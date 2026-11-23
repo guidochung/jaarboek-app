@@ -18,10 +18,7 @@ jobs:
             apt-get update -qq
             xargs -a packages.txt apt-get install -y -qq --no-install-recommends > /dev/null
             pip install -q -r requirements.txt
-            useradd -m appuser
-            su appuser -c "cd /app && python deploy/rooktest.py"
-            su appuser -c "cd /app && (streamlit run app.py --server.port 8501 --server.headless true > /tmp/st.log 2>&1 &) ; \
-              for i in \$(seq 1 30); do curl -sf http://localhost:8501/_stcore/health && break; sleep 2; done; \
-              python -c \"import urllib.request; print(urllib.request.urlopen(\\\"http://localhost:8501/_stcore/health\\\").read())\""
             chromium --version
+            useradd -m appuser
+            su appuser -c "cd /app && python deploy/rooktest.py && python deploy/start_app.py"
           '
