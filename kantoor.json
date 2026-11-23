@@ -1,0 +1,8 @@
+{
+  "naam": "PFC Administraties B.V.",
+  "plaats": "Zwanenburg",
+  "ondertekenaar": "R.A. de Wit",
+  "signaal_drempel_bedrag": 5000,
+  "signaal_drempel_procent": 25,
+  "ai_effort": "medium"
+}

@@ -1,0 +1,580 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<title>{{ m.bedrijf }} Jaarrekening {{ m.jaar }}</title>
+<style>
+  @page { size: A4; margin: 0; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #fff; }
+  body { font-family: Helvetica, Arial, sans-serif; font-size: 10pt; color: #000;
+         -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+
+  .page { width: 210mm; height: 297mm; position: relative; overflow: hidden;
+          break-after: page; page-break-after: always; }
+  .page:last-child { break-after: auto; page-break-after: auto; }
+  .content { position: absolute; left: 56.7pt; top: 100pt; width: 496.2pt; }
+  .content.cont { top: 86pt; }
+
+  /* voettekst */
+  .footer { position: absolute; top: 806.4pt; left: 0; width: 100%; font-size: 9pt; color: #818179; }
+  .footer .pn { position: absolute; left: 193.3pt; width: 200pt; text-align: center; }
+  .footer .co { position: absolute; right: 42.8pt; }
+
+  /* watermerk */
+  .wm { position: absolute; left: 288pt; top: 405pt; transform: translate(-50%, -50%) rotate(-45deg);
+        font-family: Arial, Helvetica, sans-serif; font-size: 96pt; color: rgba(0, 0, 0, 0.21);
+        white-space: nowrap; z-index: 10; pointer-events: none; }
+
+  h1 { font-size: 18pt; line-height: 22pt; font-weight: normal; margin: 0; }
+  h1 + .sec { margin-top: 66pt; }
+  h1 + p.lead { margin-top: 20pt; }
+  p.lead + .sec { margin-top: 40pt; }
+  h2 { font-size: 11pt; line-height: 13pt; font-weight: bold; margin: 0 0 18pt; }
+  .sec { margin-bottom: 42pt; }
+  p { margin: 0 0 13.2pt; line-height: 13.2pt; }
+  .sec > table + p { margin-top: 14pt; }
+  .sec > p:last-child { margin-bottom: 0; }
+
+  table { border-collapse: collapse; table-layout: fixed; width: 496.2pt; }
+  col.lab { width: 165.4pt; } col.n4 { width: 82.7pt; } col.n2 { width: 165.4pt; }
+  td { padding: 1.45pt 5.4pt 1.45pt 0; line-height: 13.2pt; vertical-align: top; }
+  td.v { text-align: right; }
+  .b { font-weight: bold; }
+  tr.hd td.v, tr.h1r td.v { border-top: 0.5pt solid #818179; padding-top: 3pt; padding-bottom: 3.3pt; }
+  tr.hd td.v { border-bottom: 1pt solid #818179; }
+  tr.h2r td.v { border-top: 0.5pt solid #818179; border-bottom: 1pt solid #818179; padding-top: 3pt; padding-bottom: 3.3pt; }
+  td.tl { border-top: 0.5pt solid #000; padding-top: 1.7pt; }
+  td.gt { border-top: 0.5pt solid #000; border-bottom: 1.5pt double #c0c0c0; padding-top: 1.7pt; }
+  tr.blank td { height: 16.1pt; }
+
+  /* titelpagina */
+  .cover-line { position: absolute; height: 0; border-top: 0.5pt solid #818179; }
+  .cover-title { position: absolute; left: 56.7pt; font-size: 24pt; line-height: 29pt; }
+  .cover-meta { position: absolute; font-size: 9pt; line-height: 11pt; }
+  .cover-meta .k { position: absolute; right: 0; width: 120pt; text-align: right; }
+  /* scheidingspagina's */
+  .div-title { position: absolute; left: 56.7pt; font-size: 24pt; line-height: 29pt; }
+
+  /* inhoudsopgave */
+  .toc { width: 496.2pt; margin-top: 18pt; }
+  .toc div { display: flex; justify-content: space-between; line-height: 13.2pt; }
+  .toc .sub { padding-left: 14.2pt; }
+  .toc .gap { height: 18pt; }
+</style>
+</head>
+<body>
+
+{% macro footer(nr) -%}
+<div class="footer"><span class="pn">Pagina {{ nr }} van {{ m.pagina_totaal }}</span><span class="co">{{ m.bedrijf }}</span></div>
+{% if m.concept %}<div class="wm">CONCEPT</div>{% endif %}
+{%- endmacro %}
+
+{% macro nt(groep, rws, totalen, koppen) -%}
+{%- set nn = koppen|length %}
+<table>
+  <colgroup><col class="lab">{% for k in koppen %}{% if nn == 2 %}<col class="n2">{% else %}<col style="width:{{ '%.2f'|format(330.8 / nn) }}pt">{% endif %}{% endfor %}</colgroup>
+  <tr class="h1r"><td></td>{% for k in koppen %}<td class="v">{{ k[0] }}</td>{% endfor %}</tr>
+  <tr class="h2r"><td></td>{% for k in koppen %}<td class="v">{{ k[1] }}</td>{% endfor %}</tr>
+  <tr><td class="b">{{ groep }}</td>{% for k in koppen %}<td></td>{% endfor %}</tr>
+  {%- for lab, vals in rws %}
+  <tr><td>{{ lab }}</td>{% for v in vals %}<td class="v">{{ v|n }}</td>{% endfor %}</tr>
+  {%- endfor %}
+  <tr><td></td>{% for v in totalen %}<td class="v b gt">{{ v|n }}</td>{% endfor %}</tr>
+</table>
+{%- endmacro %}
+
+{# Overzichtstabel (balans / W&V) bij meer dan 2 jaarkolommen: één kolom per jaar #}
+{% macro stg(rijen, koppen) -%}
+{%- set nn = koppen|length %}
+<table>
+  <colgroup><col class="lab">{% for k in koppen %}<col style="width:{{ '%.2f'|format(330.8 / nn) }}pt">{% endfor %}</colgroup>
+  <tr class="hd"><td></td>{% for k in koppen %}<td class="v">{{ k[1] }}</td>{% endfor %}</tr>
+  {%- for soort, lab, k in rijen %}
+  {%- if soort == "blank" %}
+  <tr class="blank"><td></td>{% for x in koppen %}<td></td>{% endfor %}</tr>
+  {%- elif soort == "kop" %}
+  <tr><td class="b">{{ lab }}</td>{% for x in koppen %}<td></td>{% endfor %}</tr>
+  {%- elif soort == "regel" %}
+  <tr><td>{{ lab }}</td>{% for v in tot(k) %}<td class="v">{{ v|n }}</td>{% endfor %}</tr>
+  {%- elif soort == "sub" %}
+  <tr><td class="b">{{ lab }}</td>{% for v in tot(k) %}<td class="v b tl">{{ v|n }}</td>{% endfor %}</tr>
+  {%- elif soort == "vet" %}
+  <tr><td class="b">{{ lab }}</td>{% for v in tot(k) %}<td class="v b">{{ v|n }}</td>{% endfor %}</tr>
+  {%- elif soort == "tot" %}
+  <tr><td class="b">{{ lab }}</td>{% for v in tot(k) %}<td class="v b gt">{{ v|n }}</td>{% endfor %}</tr>
+  {%- endif %}
+  {%- endfor %}
+</table>
+{%- endmacro %}
+
+{% set ns = namespace(r=[("regel", "Omzet", "omzet"), ("regel", "Kostprijs van de omzet", "kostprijs"), ("sub", "Brutomarge", "brutomarge"), ("blank", "", "")]) %}
+{%- for k in ["afschrijvingen", "pers_overig", "huisvesting", "verkoop", "auto", "kantoor", "algemeen"] if toon(k) %}{% set ns.r = ns.r + [("regel", L[k], k)] %}{% endfor %}
+{%- set wv_rijen = ns.r + [("sub", "Totaal kosten", "totaal_kosten"), ("blank", "", ""), ("sub", "Bedrijfsresultaat", "bedrijfsresultaat"), ("blank", "", ""), ("regel", "Financiële baten en lasten", "financieel"), ("tot", "Resultaat", "resultaat")] %}
+{% set B1 = "31-12-" ~ m.jaar %}{% set B0 = "31-12-" ~ m.vorig_jaar %}
+{% set W1 = m.jaar|string %}{% set W0 = m.vorig_jaar|string %}
+
+<!-- 1 Titelpagina -->
+<section class="page">
+  <div class="cover-line" style="left:56.7pt; width:496.2pt; top:270.5pt"></div>
+  <div class="cover-title" style="top:326pt">Jaarrekening {{ m.jaar }}</div>
+  <div class="cover-title" style="top:365pt">{{ m.bedrijf }}</div>
+  <div class="cover-line" style="left:56.7pt; width:496.2pt; top:451.2pt"></div>
+  <div class="cover-line" style="left:51pt; width:507.6pt; top:776.5pt"></div>
+  <div class="cover-meta" style="left:0; top:782pt; width:100%">
+    <span class="k" style="left:57pt; right:auto">Verslagperiode</span>
+    <span style="position:absolute; left:186pt">1 januari {{ m.jaar }} - 31 december {{ m.jaar }}</span>
+  </div>
+  <div class="cover-meta" style="left:0; top:803.3pt; width:100%">
+    <span class="k" style="left:57pt; right:auto">Gegenereerd op</span>
+    <span style="position:absolute; left:186pt">{{ m.datum }}</span>
+  </div>
+  {% if m.concept %}<div class="wm">CONCEPT</div>{% endif %}
+</section>
+
+<!-- 2 Inhoudsopgave -->
+<section class="page">
+  <div class="content" style="top:97pt">
+    <h1>Inhoudsopgave</h1>
+    <div class="toc">
+      <div><span>FINANCIEEL VERSLAG</span><span>3</span></div>
+      <div class="sub"><span>Voorwoord</span><span>4</span></div>
+      <div class="gap"></div>
+      <div><span>JAARREKENING</span><span>5</span></div>
+      <div class="sub"><span>Balans</span><span>6</span></div>
+      <div class="sub"><span>Winst-en-verliesrekening</span><span>8</span></div>
+      <div class="sub"><span>Toelichting op de jaarrekening</span><span>9</span></div>
+      <div class="sub"><span>Toelichting op de balans</span><span>12</span></div>
+      <div class="sub"><span>Toelichting op de winst-en-verliesrekening</span><span>17</span></div>
+    </div>
+  </div>
+  {{ footer(2) }}
+</section>
+
+<!-- 3 Financieel verslag -->
+<section class="page">
+  <div class="div-title" style="top:197.5pt">Financieel verslag</div>
+  <div class="div-title" style="top:279pt">{{ m.bedrijf }}</div>
+  {{ footer(3) }}
+</section>
+
+<!-- 4 Voorwoord -->
+<section class="page">
+  <div class="content">
+    <h1>Voorwoord</h1>
+    <p style="margin-top:20pt">OPDRACHTVERANTWOORDING</p>
+    <p>De jaarrekening van {{ m.bedrijf }} te {{ m.klant.vestigingsplaats }} is door ons samengesteld op basis van de van u gekregen
+    informatie. De jaarrekening bestaat uit de balans per 31 december {{ m.jaar }} en de winst-en-verliesrekening over
+    {{ m.jaar }} met de daarbij behorende toelichting. In deze toelichting is onder andere een overzicht van de
+    gehanteerde grondslagen voor financiële verslaggeving opgenomen.</p>
+    <p>Deze samenstellingsopdracht is door ons uitgevoerd volgende Nederlands recht. Op grond van deze standaard
+    wordt van ons verwacht dat wij u ondersteunen bij het opstellen en presenteren van de jaarrekening in
+    overeenstemming met Titel 9 Boek 2 van het Burgerlijk Wetboek. Wij hebben daarbij onze deskundigheid op het
+    gebied van administratieve verwerking en financiële verslaggeving toegepast.</p>
+    <p>Bij een samenstellingsopdracht bent u er verantwoordelijk voor dat de informatie klopt en dat u ons alle
+    relevante informatie aanlevert. Wij hebben onze werkzaamheden, in overeenstemming met de daarvoor
+    geldende regelgeving, dan ook uitgevoerd vanuit de veronderstelling dat u aan deze verantwoordelijkheid heeft
+    voldaan. Als slotstuk van onze werkzaamheden zijn wij door het lezen van de jaarrekening globaal nagegaan
+    dat het beeld van de jaarrekening overeenkwam met onze kennis van {{ m.bedrijf }}.</p>
+    <p>De aard en de omvang van onze werkzaamheden brengen met zich mee dat zij niet kunnen resulteren in die
+    zekerheid omtrent de getrouwheid van de jaarrekening die aan een accountantsverklaring of
+    beoordelingsverklaring kan worden ontleend.</p>
+    <p>{{ m.kantoor.plaats }}, {{ m.datum }}</p>
+    <p style="margin-top:39.6pt; margin-bottom:0">{{ m.kantoor.ondertekenaar }}</p>
+    <p>{{ m.kantoor.naam }}</p>
+  </div>
+  {{ footer(4) }}
+</section>
+
+<!-- 5 Jaarrekening -->
+<section class="page">
+  <div class="div-title" style="top:197.5pt">Jaarrekening</div>
+  <div class="div-title" style="top:279pt">{{ m.bedrijf }}</div>
+  {{ footer(5) }}
+</section>
+
+<!-- 6 Balans activa -->
+<section class="page">
+  <div class="content">
+    <h1>Balans</h1>
+    <p class="lead">Na resultaatbestemming.</p>
+    <div class="sec">
+      <h2>Balans activa</h2>
+      {% if m.n == 2 %}<table>
+        <colgroup><col class="lab"><col class="n4"><col class="n4"><col class="n4"><col class="n4"></colgroup>
+        <tr class="hd"><td></td><td class="v"></td><td class="v">{{ B1 }}</td><td class="v"></td><td class="v">{{ B0 }}</td></tr>
+        <tr><td class="b">Vaste activa</td><td></td><td></td><td></td><td></td></tr>
+        <tr><td>Materiële vaste activa</td><td class="v">{{ c.mva|n }}</td><td></td><td class="v">{{ p.mva|n }}</td><td></td></tr>
+        <tr><td></td><td class="tl"></td><td class="v b">{{ c.mva|n }}</td><td class="tl"></td><td class="v b">{{ p.mva|n }}</td></tr>
+        <tr class="blank"><td></td><td></td><td></td><td></td><td></td></tr>
+        <tr><td class="b">Vlottende activa</td><td></td><td></td><td></td><td></td></tr>
+        <tr><td>Vorderingen</td><td class="v">{{ c.vorderingen|n }}</td><td></td><td class="v">{{ p.vorderingen|n }}</td><td></td></tr>
+        <tr><td>Liquide middelen</td><td class="v">{{ c.liquide|n }}</td><td></td><td class="v">{{ p.liquide|n }}</td><td></td></tr>
+        <tr><td></td><td class="tl"></td><td class="v b">{{ c.vlottend|n }}</td><td class="tl"></td><td class="v b">{{ p.vlottend|n }}</td></tr>
+        <tr class="blank"><td></td><td></td><td></td><td></td><td></td></tr>
+        <tr><td class="b">Activa</td><td></td><td class="v b gt">{{ c.activa|n }}</td><td></td><td class="v b gt">{{ p.activa|n }}</td></tr>
+      </table>{% else %}{{ stg([("kop", "Vaste activa", ""), ("regel", "Materiële vaste activa", "mva"), ("sub", "", "mva"), ("blank", "", ""), ("kop", "Vlottende activa", ""), ("regel", "Vorderingen", "vorderingen"), ("regel", "Liquide middelen", "liquide"), ("sub", "", "vlottend"), ("blank", "", ""), ("tot", "Activa", "activa")], KB) }}{% endif %}
+    </div>
+  </div>
+  {{ footer(6) }}
+</section>
+
+<!-- 7 Balans passiva -->
+<section class="page">
+  <div class="content cont" style="top:100pt">
+    <div class="sec">
+      <h2>Balans passiva</h2>
+      {% if m.n == 2 %}<table>
+        <colgroup><col class="lab"><col class="n4"><col class="n4"><col class="n4"><col class="n4"></colgroup>
+        <tr class="hd"><td></td><td class="v"></td><td class="v">{{ B1 }}</td><td class="v"></td><td class="v">{{ B0 }}</td></tr>
+        <tr><td class="b">Eigen vermogen</td><td></td><td></td><td></td><td></td></tr>
+        <tr><td>Kapitaal</td><td class="v">{{ c.kapitaal|n }}</td><td></td><td class="v">{{ p.kapitaal|n }}</td><td></td></tr>
+        <tr><td></td><td class="tl"></td><td class="v b">{{ c.ev|n }}</td><td class="tl"></td><td class="v b">{{ p.ev|n }}</td></tr>
+        <tr class="blank"><td></td><td></td><td></td><td></td><td></td></tr>
+        <tr><td class="b">Langlopende schulden</td><td></td><td class="v b">{{ c.lt|n }}</td><td></td><td class="v b">{{ p.lt|n }}</td></tr>
+        <tr class="blank"><td></td><td></td><td></td><td></td><td></td></tr>
+        <tr><td class="b">Kortlopende schulden</td><td></td><td class="v b">{{ c.kt|n }}</td><td></td><td class="v b">{{ p.kt|n }}</td></tr>
+        <tr class="blank"><td></td><td></td><td></td><td></td><td></td></tr>
+        <tr><td class="b">Passiva</td><td></td><td class="v b gt">{{ c.passiva|n }}</td><td></td><td class="v b gt">{{ p.passiva|n }}</td></tr>
+      </table>{% else %}{{ stg([("kop", "Eigen vermogen", ""), ("regel", "Kapitaal", "kapitaal"), ("sub", "", "ev"), ("blank", "", ""), ("vet", "Langlopende schulden", "lt"), ("blank", "", ""), ("vet", "Kortlopende schulden", "kt"), ("blank", "", ""), ("tot", "Passiva", "passiva")], KB) }}{% endif %}
+    </div>
+  </div>
+  {{ footer(7) }}
+</section>
+
+<!-- 8 Winst-en-verliesrekening -->
+<section class="page">
+  <div class="content">
+    <h1>Winst-en-verliesrekening</h1>
+    <div class="sec">
+      <h2>Winst-en-verliesrekening</h2>
+      {% if m.n == 2 %}<table>
+        <colgroup><col class="lab"><col class="n4"><col class="n4"><col class="n4"><col class="n4"></colgroup>
+        <tr class="hd"><td></td><td class="v"></td><td class="v">{{ W1 }}</td><td class="v"></td><td class="v">{{ W0 }}</td></tr>
+        <tr><td>Omzet</td><td class="v">{{ c.omzet|n }}</td><td></td><td class="v">{{ p.omzet|n }}</td><td></td></tr>
+        <tr><td>Kostprijs van de omzet</td><td class="v">{{ c.kostprijs|n }}</td><td></td><td class="v">{{ p.kostprijs|n }}</td><td></td></tr>
+        <tr><td class="b">Brutomarge</td><td class="tl"></td><td class="v b">{{ c.brutomarge|n }}</td><td class="tl"></td><td class="v b">{{ p.brutomarge|n }}</td></tr>
+        <tr class="blank"><td></td><td></td><td></td><td></td><td></td></tr>
+        {%- for k in ["afschrijvingen", "pers_overig", "huisvesting", "verkoop", "auto", "kantoor", "algemeen"] if toon(k) %}
+        <tr><td>{{ L[k] }}</td><td class="v">{{ c[k]|n }}</td><td></td><td class="v">{{ p[k]|n }}</td><td></td></tr>
+        {%- endfor %}
+        <tr><td class="b">Totaal kosten</td><td class="tl"></td><td class="v b">{{ c.totaal_kosten|n }}</td><td class="tl"></td><td class="v b">{{ p.totaal_kosten|n }}</td></tr>
+        <tr class="blank"><td></td><td></td><td></td><td></td><td></td></tr>
+        <tr><td class="b">Bedrijfsresultaat</td><td></td><td class="v b tl">{{ c.bedrijfsresultaat|n }}</td><td></td><td class="v b tl">{{ p.bedrijfsresultaat|n }}</td></tr>
+        <tr class="blank"><td></td><td></td><td></td><td></td><td></td></tr>
+        <tr><td>Financiële baten en lasten</td><td></td><td class="v">{{ c.financieel|n }}</td><td></td><td class="v">{{ p.financieel|n }}</td></tr>
+        <tr><td class="b">Resultaat</td><td></td><td class="v b gt">{{ c.resultaat|n }}</td><td></td><td class="v b gt">{{ p.resultaat|n }}</td></tr>
+      </table>{% else %}{{ stg(wv_rijen, KW) }}{% endif %}
+    </div>
+  </div>
+  {{ footer(8) }}
+</section>
+
+<!-- 9 Toelichting op de jaarrekening (1) -->
+<section class="page">
+  <div class="content">
+    <h1>Toelichting op de jaarrekening</h1>
+    <div class="sec">
+      <h2>Vestigingsadres, rechtsvorm en inschrijfnummer handelsregister</h2>
+      <p>{{ m.bedrijf }} is feitelijk gevestigd te {{ m.klant.vestigingsplaats }} en is ingeschreven bij het handelsregister onder nummer
+      {{ m.klant.kvk }}.</p>
+    </div>
+    <div class="sec">
+      <h2>Algemene grondslagen voor verslaggeving</h2>
+      <p>De jaarrekening is opgesteld in overeenstemming met de in Nederland algemeen aanvaarde commerciële
+      grondslagen voor financiële verslaglegging. De bedragen worden weergegeven in euro’s.</p>
+      <p>Activa en passiva worden in het algemeen gewaardeerd tegen de verkrijgings- of vervaardigingsprijs of de
+      actuele waarde. Indien geen specifieke waarderingsgrondslag is vermeld vindt waardering plaats tegen de
+      verkrijgingsprijs.</p>
+    </div>
+    <div class="sec">
+      <h2>Grondslag van materiële vaste activa</h2>
+      <p style="margin-bottom:0">De materiële vaste activa worden gewaardeerd tegen verkrijgings- of vervaardigingsprijs inclusief direct
+      toerekenbare kosten, onder aftrek van lineaire afschrijvingen gedurende de verwachte toekomstige
+      gebruiksduur en bijzondere waardeverminderingen.</p>
+      <p>Subsidies op investeringen worden in mindering gebracht op de verkrijgings- of vervaardigingsprijs van de
+      activa waarop de subsidies betrekking hebben.</p>
+    </div>
+    <div class="sec">
+      <h2>Grondslag van vorderingen</h2>
+      <p>Vorderingen worden bij eerste verwerking gewaardeerd tegen de reële waarde van de tegenprestatie, inclusief
+      de transactiekosten. Vorderingen worden na eerste verwerking gewaardeerd tegen de geamortiseerde kostprijs.
+      Voorzieningen wegens oninbaarheid worden in mindering gebracht op de boekwaarde van de vordering.</p>
+    </div>
+  </div>
+  {{ footer(9) }}
+</section>
+
+<!-- 10 Toelichting op de jaarrekening (2) -->
+<section class="page">
+  <div class="content cont">
+    <div class="sec">
+      <h2>Grondslag van liquide middelen</h2>
+      <p>Liquide middelen bestaan uit kas, banktegoeden en deposito's met een looptijd korter dan twaalf maanden.
+      Rekening-courantschulden bij banken zijn opgenomen onder schulden aan kredietinstellingen onder
+      kortlopende schulden. Liquide middelen worden gewaardeerd tegen nominale waarde.</p>
+    </div>
+    <div class="sec">
+      <h2>Grondslag van langlopende schulden</h2>
+      <p>Langlopende schulden worden bij de eerste verwerking gewaardeerd tegen reële waarde. Transactiekosten die
+      direct zijn toe te rekenen aan de verwerving van de langlopende schulden worden in de waardering bij eerste
+      verwerking opgenomen. Langlopende schulden worden na eerste verwerking gewaardeerd tegen
+      geamortiseerde kostprijs, zijnde het ontvangen bedrag rekening houdend met agio of disagio en onder aftrek
+      van transactiekosten.</p>
+      <p>Het verschil tussen de bepaalde boekwaarde en de uiteindelijke aflossingswaarde wordt op basis van de
+      effectieve rente gedurende de geschatte looptijd van de langlopende schulden in de winst-en-verliesrekening
+      als interestlast verwerkt.</p>
+      <p>Voor de oudedagsverplichtingen op basis van de ‘Wet uitfasering pensioen in eigen beheer en overige fiscale
+      pensioenmaatregelen’ is een verplichting opgenomen. Deze verplichting is conform RJk B14.110a gewaardeerd
+      tegen de fiscale boekwaarde.</p>
+    </div>
+    <div class="sec">
+      <h2>Grondslag van kortlopende schulden</h2>
+      <p>Kortlopende schulden worden bij de eerste verwerking gewaardeerd tegen reële waarde. Kortlopende schulden
+      worden na eerste verwerking gewaardeerd tegen de bedragen waartegen de schuld moet worden afgelost.</p>
+    </div>
+    <div class="sec">
+      <h2>Grondslagen voor de bepaling van het resultaat</h2>
+      <p>Het resultaat wordt bepaald als het verschil tussen de opbrengstwaarde van de geleverde prestaties en de
+      kosten en andere lasten over het jaar. De opbrengsten op transacties worden verantwoord in het jaar waarin zij
+      zijn gerealiseerd.</p>
+      <p>Het resultaat wordt tevens bepaald met inachtneming van de verwerking van ongerealiseerde
+      waardeveranderingen van op reële waarde gewaardeerde:<br>
+      - vastgoedbeleggingen;<br>
+      - onder vlottende activa opgenomen effecten.</p>
+    </div>
+  </div>
+  {{ footer(10) }}
+</section>
+
+<!-- 11 Toelichting op de jaarrekening (3) -->
+<section class="page">
+  <div class="content cont">
+    <div class="sec">
+      <h2>Grondslag van omzetverantwoording</h2>
+      <p style="margin-bottom:0">Algemeen</p>
+      <p>Netto-omzet omvat de opbrengsten uit levering van goederen en diensten en gerealiseerde projectopbrengsten
+      uit hoofde van onderhanden projecten onder aftrek van kortingen en dergelijke en van over de omzet geheven
+      belastingen.</p>
+      <p style="margin-bottom:0">Verkoop van goederen</p>
+      <p>Opbrengsten uit de verkoop van goederen worden verwerkt zodra alle belangrijke rechten en risico's met
+      betrekking tot de eigendom van de goederen zijn overgedragen aan de koper.</p>
+      <p style="margin-bottom:0">Verlenen van diensten</p>
+      <p>Verantwoording van opbrengsten uit de levering van diensten geschiedt naar rato van de geleverde prestaties,
+      gebaseerd op de verrichte diensten tot aan de balansdatum in verhouding tot de in totaal te verrichten diensten.</p>
+    </div>
+    <div class="sec">
+      <h2>Grondslag van overige bedrijfskosten</h2>
+      <p>De kosten worden bepaald op historische basis en toegerekend aan het verslagjaar waarop zij betrekking
+      hebben.</p>
+    </div>
+    <div class="sec">
+      <h2>Grondslag van afschrijvingen op immateriële en materiële vaste activa</h2>
+      <p>Immateriële vaste activa inclusief goodwill en materiële vaste activa worden vanaf het moment dat het actief
+      beschikbaar is voor het beoogde gebruik afgeschreven over de verwachte toekomstige gebruiksduur van het
+      actief. Over terreinen en vastgoedbeleggingen wordt niet afgeschreven.</p>
+    </div>
+    <div class="sec">
+      <h2>Grondslag van financiële baten en lasten</h2>
+      <p>Rentebaten en rentelasten worden tijdsevenredig verwerkt, rekening houdend met de effectieve rentevoet van
+      de desbetreffende activa en passiva. Bij de verwerking van de rentelasten wordt rekening gehouden met de
+      verantwoorde transactiekosten op de ontvangen leningen.</p>
+    </div>
+  </div>
+  {{ footer(11) }}
+</section>
+
+<!-- 12 Toelichting op de balans (1) -->
+<section class="page">
+  <div class="content">
+    <h1>Toelichting op de balans</h1>
+    <div class="sec">
+      <h2>Materiële vaste activa</h2>
+      {{ nt("Materiële vaste activa", rows(["mva_inventaris", "mva_vervoer"]), tot("mva"), KB) }}
+      {%- for regel in m.klant.afschrijvingen_tekst %}
+      <p{% if not loop.last %} style="margin-bottom:0"{% endif %}>{{ regel }}</p>
+      {%- endfor %}
+    </div>
+    <div class="sec">
+      <h2>Vorderingen</h2>
+      {{ nt("Vorderingen", rows(["debiteuren", "overige_vorderingen"]), tot("vorderingen"), KB) }}
+      <p>Alle vorderingen hebben een looptijd van minder dan 1 jaar, tenzij anders is aangegeven.</p>
+    </div>
+  </div>
+  {{ footer(12) }}
+</section>
+
+<!-- 13 Toelichting op de balans (2) -->
+<section class="page">
+  <div class="content cont">
+    <div class="sec">
+      <h2>Debiteuren</h2>
+      {{ nt("Debiteuren", rows(["deb_debiteuren"]), tot("debiteuren"), KB) }}
+    </div>
+    <div class="sec">
+      <h2>Overige vorderingen</h2>
+      {{ nt("Overige vorderingen", rows(["ov_vooruitbetalingen"]), tot("overige_vorderingen"), KB) }}
+    </div>
+    <div class="sec">
+      <h2>Liquide middelen</h2>
+      {{ nt("Liquide middelen", rows(["tegoeden", "kruisposten"]), tot("liquide"), KB) }}
+    </div>
+  </div>
+  {{ footer(13) }}
+</section>
+
+<!-- 14 Toelichting op de balans (3) -->
+<section class="page">
+  <div class="content cont">
+    <div class="sec">
+      <h2>Tegoeden op bankrekeningen</h2>
+      {{ nt("Tegoeden op bankrekeningen", rows(["bank_rc", "bank_spaar"]), tot("tegoeden"), KB) }}
+    </div>
+    <div class="sec">
+      <h2>Kruisposten</h2>
+      {{ nt("Kruisposten", rows(["krp_stortingen"]), tot("kruisposten"), KB) }}
+    </div>
+    <div class="sec">
+      <h2>Eigen vermogen</h2>
+      {{ nt("Eigen vermogen", rows(["kapitaal"]), tot("ev"), KB) }}
+    </div>
+  </div>
+  {{ footer(14) }}
+</section>
+
+<!-- 15 Toelichting op de balans (4) -->
+<section class="page">
+  <div class="content cont">
+    <div class="sec">
+      <h2>Langlopende schulden</h2>
+      {{ nt("Langlopende schulden", rows(["lt_fin_lease"]), tot("lt"), KB) }}
+      <p>Aflossingsverplichtingen binnen 12 maanden na afloop van het boekjaar zijn niet begrepen in de hierboven
+      genoemde bedragen maar opgenomen onder de kortlopende schulden. Alle leningen zijn afgesloten in euro’s.</p>
+    </div>
+    <div class="sec">
+      <h2>Financial Leaseverplichtingen</h2>
+      {{ nt("Financial Leaseverplichtingen", rows(m.lease_lt_posten), tot("lt_fin_lease"), KB) }}
+      {%- for tekst in m.klant.lease_teksten %}
+      <p>{{ tekst }}</p>
+      {%- endfor %}
+    </div>
+    <div class="sec">
+      <h2>Kortlopende schulden</h2>
+      {{ nt("Kortlopende schulden", rows(["kt_fin_lease", "crediteuren", "belastingen", "overlopende"]), tot("kt"), KB) }}
+      <p>De kortlopende schulden hebben een resterende looptijd van korter dan een jaar.</p>
+    </div>
+  </div>
+  {{ footer(15) }}
+</section>
+
+<!-- 16 Toelichting op de balans (5) -->
+<section class="page">
+  <div class="content cont">
+    <div class="sec">
+      <h2>Belastingen en premies sociale verzekeringen</h2>
+      {{ nt("Belastingen en premies sociale verzekeringen", rows(["btw_omzetbelasting"]), tot("belastingen"), KB) }}
+    </div>
+    <div class="sec">
+      <h2>Overlopende passiva</h2>
+      {{ nt("Overlopende passiva", rows(["otb_nog_te_betalen", "otb_vooruitontvangen"]), tot("overlopende"), KB) }}
+    </div>
+  </div>
+  {{ footer(16) }}
+</section>
+
+<!-- 17 Toelichting op de W&V (1) -->
+<section class="page">
+  <div class="content">
+    <h1>Toelichting op de winst-en-verliesrekening</h1>
+    <div class="sec">
+      <h2>Omzet</h2>
+      {{ nt("Omzet", rows(["omzet_omzet"]), tot("omzet"), KW) }}
+    </div>
+    <div class="sec">
+      <h2>Kostprijs van de omzet</h2>
+      {{ nt("Kostprijs van de omzet", rows(["inkopen"]), tot("kostprijs"), KW) }}
+    </div>
+  </div>
+  {{ footer(17) }}
+</section>
+
+<!-- 18 Toelichting op de W&V (2) -->
+<section class="page">
+  <div class="content cont">
+    <div class="sec">
+      <h2>Totaalkosten</h2>
+      {{ nt("Totaalkosten", rows(["afschrijvingen", "pers_overig", "huisvesting", "verkoop", "auto", "kantoor", "algemeen"]), tot("totaal_kosten"), KW) }}
+    </div>
+    <div class="sec">
+      <h2>Afschrijvingen</h2>
+      {{ nt("Afschrijvingen", rows(["afschr_mva"]), tot("afschrijvingen"), KW) }}
+    </div>
+    <div class="sec">
+      <h2>Afschrijvingen materiële vaste activa</h2>
+      {{ nt("Afschrijvingen materiële vaste activa", rows(["afschr_transport", "afschr_inventaris"]), tot("afschr_mva"), KW) }}
+    </div>
+  </div>
+  {{ footer(18) }}
+</section>
+
+<!-- 19 Toelichting op de W&V (3) -->
+<section class="page">
+  <div class="content cont">
+    {% if toon("pers_overig") %}
+    <div class="sec">
+      <h2>Overige personeelskosten</h2>
+      {{ nt("Overige personeelskosten", rows(["pers_uitzend"]), tot("pers_overig"), KW) }}
+    </div>
+    {% endif %}
+    <div class="sec">
+      <h2>Huisvestingskosten</h2>
+      {{ nt("Huisvestingskosten", rows(["huis_huur", "huis_schoonmaak"]), tot("huisvesting"), KW) }}
+    </div>
+    <div class="sec">
+      <h2>Verkoopkosten</h2>
+      {{ nt("Verkoopkosten", rows(["verk_reclame", "verk_representatie", "verk_relatiegeschenken"]), tot("verkoop"), KW) }}
+    </div>
+  </div>
+  {{ footer(19) }}
+</section>
+
+<!-- 20 Toelichting op de W&V (4) -->
+<section class="page">
+  <div class="content cont">
+    <div class="sec">
+      <h2>Autokosten</h2>
+      {{ nt("Autokosten", rows(["auto_brandstof", "auto_onderhoud", "auto_mrb", "auto_operational_lease", "auto_overig"]), tot("auto"), KW) }}
+    </div>
+    <div class="sec">
+      <h2>Kantoorkosten</h2>
+      {{ nt("Kantoorkosten", rows(["kant_benodigdheden", "kant_telefoon"]), tot("kantoor"), KW) }}
+    </div>
+    <div class="sec">
+      <h2>Algemene kosten</h2>
+      {{ nt("Algemene kosten", rows(["alg_administratie", "alg_verzekeringen", "alg_kleine_aansch", "alg_abonnementen", "alg_betalingsverschillen", "alg_werkkleding", "alg_overig"]), tot("algemeen"), KW) }}
+    </div>
+  </div>
+  {{ footer(20) }}
+</section>
+
+<!-- 21 Toelichting op de W&V (5) -->
+<section class="page">
+  <div class="content cont">
+    <div class="sec">
+      <h2>Financiële baten en lasten</h2>
+      {{ nt("Financiële baten en lasten", rows(["rentebaten", "rentelasten"]), tot("financieel"), KW) }}
+    </div>
+    <div class="sec">
+      <h2>Rentebaten en soortgelijke opbrengsten</h2>
+      {{ nt("Rentebaten en soortgelijke opbrengsten", rows(["rb_bank"]), tot("rentebaten"), KW) }}
+    </div>
+    <div class="sec">
+      <h2>Rentelasten en soortgelijke kosten</h2>
+      {{ nt("Rentelasten en soortgelijke kosten", rows(["rl_financieringen"]), tot("rentelasten"), KW) }}
+    </div>
+  </div>
+  {{ footer(21) }}
+</section>
+
+</body>
+</html>

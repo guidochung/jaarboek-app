@@ -1,0 +1,13 @@
+# Echte klantgegevens: nooit in git
+klanten/
+proefruns/
+tests/data/
+tests/golden/
+*.pdf
+*.xlsx
+assets/*.png
+
+__pycache__/
+.pytest_cache/
+.DS_Store
+.venv/

@@ -1,0 +1,48 @@
+# Bij elke push naar main: container bouwen, rooktest draaien en (als HF_TOKEN bestaat) de app naar de
+# Hugging Face Space zetten. Naar de Space gaat alleen wat de app nodig heeft (geen tests of notities).
+name: Hugging Face Space
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  bouwen-en-publiceren:
+    runs-on: ubuntu-latest
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_SPACE: ${{ vars.HF_SPACE }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Container bouwen
+        run: docker build -t jaarboek .
+
+      - name: Rooktest (Chromium, letters, modules)
+        run: |
+          docker run --rm -v "$PWD/deploy:/home/user/app/deploy:ro" jaarboek python deploy/rooktest.py
+
+      - name: App start en antwoordt
+        run: |
+          docker run -d --name jb -p 7860:7860 -e JAARBOEK_WACHTWOORD=test jaarboek
+          for i in $(seq 1 30); do curl -sf http://localhost:7860/_stcore/health && break; sleep 2; done
+          curl -sf http://localhost:7860/_stcore/health
+          docker logs jb | tail -20
+
+      - name: Naar Hugging Face
+        if: ${{ env.HF_TOKEN != '' && env.HF_SPACE != '' }}
+        run: |
+          mkdir uit
+          cp -r app.py jaarboek templates assets .streamlit kantoor.json standaard_mapping.json \
+                requirements.txt Dockerfile uit/
+          cp deploy/README.md uit/README.md
+          cp .dockerignore uit/
+          rm -rf uit/jaarboek/__pycache__
+          cd uit
+          git init -q -b main
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add -A
+          git commit -qm "Deploy ${GITHUB_SHA::7}"
+          git push --force "https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE}" main

@@ -1,0 +1,16 @@
+.git
+.github
+klanten
+proefruns
+tests
+deploy/README.md
+*.md
+*.pdf
+*.xlsx
+assets/*.png
+__pycache__
+.pytest_cache
+.DS_Store
+app_uitgebreid.py
+build_jaarrekening.py
+proefrun_api.py

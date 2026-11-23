@@ -1,0 +1,260 @@
+{
+  "_toelichting": "Standaardkoppeling van het kantoor (Asperion-rekeningschema). Wordt gekopieerd naar elke nieuwe klant; leasecontracten en afwijkende rekeningen komen per klant erbij.",
+  "rekeningen": {
+    "40": "mva_inventaris",
+    "41": "mva_inventaris",
+    "42": "mva_inventaris",
+    "50": "mva_vervoer",
+    "51": "mva_vervoer",
+    "52": "mva_vervoer",
+    "1000": "deb_debiteuren",
+    "1170": "ov_vooruitbetalingen",
+    "1220": "bank_rc",
+    "1222": "bank_spaar",
+    "1223": "bank_spaar",
+    "1250": "krp_stortingen",
+    "200": "ev_rekeningen",
+    "210": "ev_rekeningen",
+    "220": "ev_rekeningen",
+    "239": "ev_rekeningen",
+    "250": "ev_rekeningen",
+    "1400": "crediteuren",
+    "1505": "btw_omzetbelasting",
+    "1513": "btw_omzetbelasting",
+    "1516": "btw_omzetbelasting",
+    "1517": "btw_omzetbelasting",
+    "1521": "btw_omzetbelasting",
+    "1523": "btw_omzetbelasting",
+    "1525": "btw_omzetbelasting",
+    "1530": "btw_omzetbelasting",
+    "1535": "btw_omzetbelasting",
+    "1950": "otb_nog_te_betalen",
+    "1960": "otb_vooruitontvangen",
+    "8000": "omzet_omzet",
+    "8011": "omzet_omzet",
+    "7000": "inkopen",
+    "7002": "inkopen",
+    "7200": "inkopen",
+    "7300": "inkopen",
+    "4640": "afschr_inventaris",
+    "4650": "afschr_transport",
+    "4100": "huis_huur",
+    "4115": "huis_schoonmaak",
+    "4400": "auto_brandstof",
+    "4410": "auto_onderhoud",
+    "4420": "auto_mrb",
+    "4450": "auto_operational_lease",
+    "4490": "auto_overig",
+    "4500": "verk_reclame",
+    "4530": "verk_representatie",
+    "4580": "verk_relatiegeschenken",
+    "4070": "alg_overig",
+    "4086": "alg_werkkleding",
+    "4301": "alg_administratie",
+    "4350": "alg_abonnementen",
+    "4360": "alg_kleine_aansch",
+    "4375": "alg_verzekeringen",
+    "4390": "alg_overig",
+    "9920": "alg_betalingsverschillen",
+    "4310": "kant_telefoon",
+    "4330": "kant_benodigdheden",
+    "4930": "rb_bank",
+    "4960": "rl_financieringen",
+    "4961": "rl_financieringen",
+    "4970": "rl_financieringen"
+  },
+  "leasecontracten": {},
+  "_leasecontracten_toelichting": "Kortlopend deel = aflossing in het boekjaar (saldo begin - saldo eind). Dit is de methode die in de jaarrekening 2024 is gebruikt (stelselmatigheid).",
+  "wv_doelen": {
+    "omzet": {
+      "secties": [
+        "OPBRENGST VERKOPEN"
+      ]
+    },
+    "kostprijs": {
+      "secties": [
+        "KOSTPRIJS VERKOPEN"
+      ]
+    },
+    "afschrijvingen": {
+      "groepen": [
+        "Afschrijvingen vaste aktiva"
+      ]
+    },
+    "pers_overig": {
+      "bron": "rekeningen"
+    },
+    "huisvesting": {
+      "groepen": [
+        "Huisvestingskosten"
+      ]
+    },
+    "verkoop": {
+      "groepen": [
+        "Verkoopkosten"
+      ]
+    },
+    "auto": {
+      "groepen": [
+        "Autokosten"
+      ]
+    },
+    "kantoor": {
+      "groepen": [
+        "Kantoorkosten"
+      ]
+    },
+    "algemeen": {
+      "groepen": [
+        "Algemene kosten"
+      ],
+      "secties": [
+        "BUITENGEWONE BATEN EN LASTEN"
+      ]
+    },
+    "rentebaten": {
+      "groepen": [
+        "Rentebaten en soortgelijke opbrengsten"
+      ]
+    },
+    "rentelasten": {
+      "groepen": [
+        "Rentelasten en soortgelijke kosten"
+      ]
+    }
+  },
+  "_wv_doelen_toelichting": "Elke W&V-post = het (sub)totaal zoals Asperion het toont. Detailregels = getoonde rekeningbedragen; afrondingsverschillen worden gemeld, niet weggewerkt. 'rekeningen' = som van de getoonde rekeningen (alleen als Asperion geen totaal toont).",
+  "balans_weergave": {
+    "mva_inventaris": {
+      "groep": "Inventaris"
+    },
+    "mva_vervoer": {
+      "groep": "Vervoermiddelen"
+    },
+    "mva": {
+      "sectie": "MATERIELE VASTE AKTIVA"
+    },
+    "debiteuren": {
+      "groep": "Debiteuren"
+    },
+    "overige_vorderingen": {
+      "groep": "Overige vorderingen"
+    },
+    "vorderingen": {
+      "sectie": "VORDERINGEN"
+    },
+    "liquide": {
+      "sectie": "LIQUIDE MIDDELEN"
+    },
+    "kapitaal_rubriek": {
+      "sectie": "KAPITAAL"
+    },
+    "lt_rubriek": {
+      "sectie": "LANGLOPENDE SCHULDEN",
+      "credit": true
+    },
+    "crediteuren": {
+      "groep": "Crediteuren",
+      "credit": true
+    },
+    "belastingen": {
+      "groep": "Omzetbelasting",
+      "credit": true
+    },
+    "overlopende": {
+      "groep": "Overige schulden",
+      "credit": true
+    },
+    "kt_rubriek": {
+      "sectie": "KORTLOPENDE SCHULDEN",
+      "credit": true
+    }
+  },
+  "rubriekcontrole": [
+    {
+      "label": "Materiële vaste activa",
+      "jaarrekening": [
+        "mva"
+      ],
+      "asperion": [
+        "balans:MATERIELE VASTE AKTIVA"
+      ]
+    },
+    {
+      "label": "Vorderingen",
+      "jaarrekening": [
+        "vorderingen"
+      ],
+      "asperion": [
+        "balans:VORDERINGEN"
+      ]
+    },
+    {
+      "label": "Liquide middelen",
+      "jaarrekening": [
+        "liquide"
+      ],
+      "asperion": [
+        "balans:LIQUIDE MIDDELEN"
+      ]
+    },
+    {
+      "label": "Leaseverplichtingen (lang + kort)",
+      "jaarrekening": [
+        "lt",
+        "kt_fin_lease"
+      ],
+      "asperion": [
+        "-balans:LANGLOPENDE SCHULDEN"
+      ]
+    },
+    {
+      "label": "Kortlopende schulden excl. lease",
+      "jaarrekening": [
+        "kt",
+        "-kt_fin_lease"
+      ],
+      "asperion": [
+        "-balans:KORTLOPENDE SCHULDEN"
+      ]
+    },
+    {
+      "label": "Omzet",
+      "jaarrekening": [
+        "omzet"
+      ],
+      "asperion": [
+        "-wv:OPBRENGST VERKOPEN"
+      ]
+    },
+    {
+      "label": "Kostprijs van de omzet",
+      "jaarrekening": [
+        "kostprijs"
+      ],
+      "asperion": [
+        "wv:KOSTPRIJS VERKOPEN"
+      ]
+    },
+    {
+      "label": "Totaal kosten",
+      "jaarrekening": [
+        "totaal_kosten"
+      ],
+      "asperion": [
+        "wv:BEDRIJFSKOSTEN",
+        "wv:BUITENGEWONE BATEN EN LASTEN"
+      ]
+    },
+    {
+      "label": "Rentelasten - rentebaten",
+      "jaarrekening": [
+        "-financieel"
+      ],
+      "asperion": [
+        "wv:FINANCIERINGSLASTEN"
+      ]
+    }
+  ],
+  "ai_voorstellen": {}
+}
