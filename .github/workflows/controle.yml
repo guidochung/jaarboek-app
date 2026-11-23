@@ -1,4 +1,4 @@
-# Bij elke push: doe na wat Streamlit Community Cloud doet (Debian 11, packages.txt, requirements.txt,
+# Bij elke push: doe na wat Streamlit Community Cloud doet (Debian; 11 is end-of-life en niet meer te installeren, packages.txt, requirements.txt,
 # niet-root gebruiker) en controleer dat Chromium een PDF maakt en de app start.
 name: Controle Streamlit Cloud
 
@@ -12,9 +12,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Debian 11 zoals Streamlit Community Cloud
+      - name: Debian zoals Streamlit Community Cloud
         run: |
-          docker run --rm -v "$PWD:/app" -w /app python:3.12-slim-bullseye bash -euc '
+          docker run --rm -v "$PWD:/app" -w /app python:3.12-slim-bookworm bash -euc '
             apt-get update -qq
             xargs -a packages.txt apt-get install -y -qq --no-install-recommends > /dev/null
             pip install -q -r requirements.txt
