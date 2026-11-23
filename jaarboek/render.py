@@ -24,8 +24,10 @@ class RenderFout(Exception):
 
 
 def chrome_vlaggen() -> list[str]:
-    """Extra Chrome-opties in een container (Docker/Hugging Face): geen sandbox en geen kleine /dev/shm."""
-    if os.environ.get("JAARBOEK_CONTAINER") or (hasattr(os, "geteuid") and os.geteuid() == 0):
+    """Extra Chrome-opties op een Linux-server of in een container (Streamlit Cloud, Docker): daar mag
+    Chrome geen eigen sandbox maken en is /dev/shm klein. We openen alleen onze eigen HTML."""
+    import sys
+    if os.environ.get("JAARBOEK_CONTAINER") or sys.platform.startswith("linux"):
         return ["--no-sandbox", "--disable-dev-shm-usage"]
     return []
 

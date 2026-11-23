@@ -31,7 +31,7 @@ from jaarboek.render import RenderFout, pdf_pagina  # noqa: E402
 from jaarboek.structuur import fmt  # noqa: E402
 
 KANTOOR_PAD = Path(os.environ.get("JAARBOEK_KANTOOR", KANTOOR_BESTAND))
-CONTAINER = bool(os.environ.get("JAARBOEK_CONTAINER"))      # gehost (Docker/Hugging Face)
+CONTAINER = bool(os.environ.get("JAARBOEK_CONTAINER")) or sys.platform.startswith("linux")   # gehost
 OPRUIMEN_NA_UUR = 6                                          # uploads en uitvoer op de server
 NEP_AI = os.environ.get("JAARBOEK_NEP_AI") == "1"
 STAP_LABELS = STAPPEN

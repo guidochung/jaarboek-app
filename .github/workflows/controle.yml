@@ -1,0 +1,27 @@
+# Bij elke push: doe na wat Streamlit Community Cloud doet (Debian 11, packages.txt, requirements.txt,
+# niet-root gebruiker) en controleer dat Chromium een PDF maakt en de app start.
+name: Controle Streamlit Cloud
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  rooktest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Debian 11 zoals Streamlit Community Cloud
+        run: |
+          docker run --rm -v "$PWD:/app" -w /app python:3.12-slim-bullseye bash -euc '
+            apt-get update -qq
+            xargs -a packages.txt apt-get install -y -qq --no-install-recommends > /dev/null
+            pip install -q -r requirements.txt
+            useradd -m appuser
+            su appuser -c "cd /app && python deploy/rooktest.py"
+            su appuser -c "cd /app && (streamlit run app.py --server.port 8501 --server.headless true > /tmp/st.log 2>&1 &) ; \
+              for i in \$(seq 1 30); do curl -sf http://localhost:8501/_stcore/health && break; sleep 2; done; \
+              python -c \"import urllib.request; print(urllib.request.urlopen(\\\"http://localhost:8501/_stcore/health\\\").read())\""
+            chromium --version
+          '

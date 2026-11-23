@@ -1,4 +1,4 @@
-# Jaarboek: Streamlit-app met headless Chromium voor de PDF's (Hugging Face Space, Docker SDK)
+# Jaarboek in Docker (voor betaalde hosting later; de demo draait op Streamlit Community Cloud)
 FROM python:3.12-slim
 
 # Chromium maakt de PDF's; Liberation Sans heeft dezelfde letterbreedtes als Helvetica/Arial,
