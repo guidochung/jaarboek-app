@@ -25,6 +25,20 @@ def test_eenvoudige_app(tmp_path, monkeypatch):
     assert at.text_input(key="api_key").value == ""              # sleutelveld (zijbalk), leeg zonder sleutel
 
 
+def test_omzet_onderdeel_via_zijbalk(tmp_path, monkeypatch):
+    _omgeving(monkeypatch, tmp_path)
+    at = AppTest.from_file(str(BASIS / "app.py"), default_timeout=60).run()
+    keuze = at.radio(key="onderdeel")
+    assert keuze.options == ["Jaarverslag", "Omzet naar Asperion"] and keuze.value == "Jaarverslag"
+    keuze.set_value("Omzet naar Asperion").run()
+    assert not at.exception
+    assert not [b for b in at.button if b.label == "Maak jaarverslag"]
+    assert len(at.get("file_uploader")) == 2                     # kassarapporten + koppeling
+    assert any("Nog nodig: het dagrapport en het productrapport." in c.value for c in at.caption)
+    at.radio(key="onderdeel").set_value("Jaarverslag").run()
+    assert any(b.label == "Maak jaarverslag" for b in at.button)
+
+
 def test_uitgebreide_app(klanten_root, tmp_path, monkeypatch):
     _omgeving(monkeypatch, tmp_path, klanten_root)
     at = AppTest.from_file(str(BASIS / "app_uitgebreid.py"), default_timeout=60).run()

@@ -6,14 +6,19 @@ Starten:  cd ~/Desktop/Jaarboek\\ app && streamlit run app.py
 from __future__ import annotations
 
 import base64
+import copy
+import hashlib
 import hmac
 import html
 import io
+import json
 import os
+import re
 import shutil
 import sys
 import tempfile
 import time
+import unicodedata
 from datetime import date
 from pathlib import Path
 
@@ -22,13 +27,16 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from jaarboek import KANTOOR_BESTAND  # noqa: E402
+from jaarboek import KANTOOR_BESTAND, KLANTEN  # noqa: E402
 from jaarboek.ai import MODEL, AIFout, ClaudeAI  # noqa: E402
 from jaarboek.dossier import laad_kantoor  # noqa: E402
 from jaarboek.doorrol import STAPPEN, DoorrolFout, bronnen, formule_tekst, pas_aan, rol_door  # noqa: E402
 from jaarboek.inlezen import InvoerFout  # noqa: E402
+from jaarboek.omzet import (TEGENREKENING_LABELS, OmzetFout, bewaar_koppeling, euro_nl,  # noqa: E402
+                            koppeling_uit_json, laad_koppeling, lees_kassarapporten, maak_boeking, naar_fmutac,
+                            prefix_uit_naam, stel_koppeling_voor)
 from jaarboek.render import RenderFout, pdf_pagina  # noqa: E402
-from jaarboek.structuur import fmt  # noqa: E402
+from jaarboek.structuur import MAANDEN, fmt  # noqa: E402
 
 KANTOOR_PAD = Path(os.environ.get("JAARBOEK_KANTOOR", KANTOOR_BESTAND))
 CONTAINER = bool(os.environ.get("JAARBOEK_CONTAINER")) or sys.platform.startswith("linux")   # gehost
@@ -185,6 +193,183 @@ def chat_antwoord_html(a: dict) -> str:
     return "".join(regels)
 
 
+def toon_gebruik(ai) -> None:
+    """Claude-gebruik van deze sessie in de zijbalk (als laatste, zodat deze run meetelt)."""
+    if ai:
+        t = ai.totaal
+        demo = " (schatting)" if NEP_AI else ""
+        gebruik_plek.html(f'<div class="jb-gebruik">Deze sessie{demo}<br><b>{dollar(t["kosten_usd"])}</b> · '
+                          f'{fmt(t["input_tokens"] + t["output_tokens"])} tokens · {t["verzoeken"]} verzoek(en)</div>')
+
+
+# --------------------------------------------------------------------------
+# Omzet naar Asperion: kassarapporten -> kasboekboeking (FMUTAC-CSV), zonder Claude
+# --------------------------------------------------------------------------
+JAARVERSLAG, OMZET = "Jaarverslag", "Omzet naar Asperion"
+ONDERTITEL = {JAARVERSLAG: "Jaarverslag uit de Asperion-balans", OMZET: "Kassa-omzet naar Asperion"}
+OMZET_KLANTEN = Path(os.environ.get("JAARBOEK_KLANTEN", KLANTEN)) / "omzet"    # lokaal bewaarde koppelingen
+
+
+def _slug(naam: str) -> str:
+    s = unicodedata.normalize("NFKD", naam).encode("ascii", "ignore").decode().lower()
+    return re.sub(r"[^a-z0-9]+", "_", s).strip("_") or "klant"
+
+
+@st.cache_data(show_spinner=False, max_entries=20)
+def _lees_kassa(bestanden: tuple[tuple[str, bytes], ...]):
+    return lees_kassarapporten(list(bestanden))
+
+
+def _koppeling_voor(bedrijf: str) -> tuple[dict, str]:
+    """Geüploade koppeling gaat voor; anders de lokaal bewaarde van deze klant; anders de standaard."""
+    up = st.session_state.get("oz_upload")
+    if up:
+        return copy.deepcopy(up["koppeling"]), f"geüpload ({up['naam']})"
+    pad = OMZET_KLANTEN / f"{_slug(bedrijf)}.json"
+    if pad.exists():
+        try:
+            return koppeling_uit_json(pad.read_text(encoding="utf-8")), f"bewaard voor {bedrijf}"
+        except OmzetFout as e:
+            st.warning(f"De bewaarde koppeling voor {bedrijf} is onleesbaar ({e}); de standaard wordt gebruikt.",
+                       icon=":material/warning:")
+    return laad_koppeling(), "standaard"
+
+
+def pagina_omzet() -> None:
+    st.html('<p class="jb-kop">Omzet naar Asperion</p>'
+            '<p class="jb-intro">Upload het dagrapport en het productrapport uit de kassa. Per kassacategorie komt er '
+            'één omzetregel met btw op de juiste grootboekrekening. De boeking download je als FMUTAC-CSV voor het '
+            'kasboek in Asperion. Hiervoor is geen Claude-sleutel nodig.</p>')
+    k1, k2 = st.columns([3, 2], gap="medium")
+    with k1:
+        st.html('<div class="jb-stap"><span class="jb-nr">1</span>Kassarapporten '
+                '<small>dagrapport en productrapport, Excel</small></div>')
+        bestanden = st.file_uploader("Kassarapporten", type=["xlsx"], accept_multiple_files=True,
+                                     key="oz_rapporten", label_visibility="collapsed")
+    with k2:
+        st.html('<div class="jb-stap"><span class="jb-nr">2</span>Koppeling <small>optioneel, eerder gedownload</small></div>')
+        up = st.file_uploader("Koppeling", type=["json"], key="oz_koppeling_upload", label_visibility="collapsed")
+
+    vorige = st.session_state.get("oz_upload")
+    if up is None and vorige:
+        st.session_state.pop("oz_upload")
+        st.session_state.oz_versie = st.session_state.get("oz_versie", 0) + 1
+    elif up is not None and (not vorige or vorige["id"] != up.file_id):
+        try:
+            st.session_state.oz_upload = {"id": up.file_id, "naam": up.name,
+                                          "koppeling": koppeling_uit_json(up.getvalue())}
+        except OmzetFout as e:
+            st.session_state.pop("oz_upload", None)
+            st.error(str(e), icon=":material/error:")
+        st.session_state.oz_versie = st.session_state.get("oz_versie", 0) + 1
+
+    if len(bestanden or []) < 2:
+        st.caption("Nog nodig: " + ("het dagrapport en het productrapport." if not bestanden
+                                    else "het tweede rapport (dag- of productrapport)."))
+        return
+    try:
+        dag, prod = _lees_kassa(tuple((f.name, f.getvalue()) for f in bestanden))
+    except OmzetFout as e:
+        st.error(str(e), icon=":material/error:")
+        return
+
+    koppeling, bron = _koppeling_voor(dag.bedrijf)
+    voorstel = stel_koppeling_voor(prod, koppeling)
+    sleutel = f"{_slug(dag.bedrijf)}_{st.session_state.get('oz_versie', 0)}"
+    sig = hashlib.sha1(b"".join(f.getvalue() for f in bestanden)).hexdigest()[:10]
+
+    st.divider()
+    kop, koppel_plek, controle_plek, regels_plek = st.container(), st.container(), st.container(), st.container()
+
+    # Koppeltabel: omschrijving en grootboekrekening per kassacategorie en btw-tarief
+    nieuw = [r for r in voorstel if not r.bekend or not r.rekening]
+    with koppel_plek, st.expander(f"Koppeling omzetcategorieën · {len(voorstel)}", expanded=bool(nieuw),
+                                  icon=":material/account_tree:"):
+        st.caption(f"Koppeling: {bron}. Elke kassacategorie wordt één regel (alle producten opgeteld). "
+                   "Een categorie met omzet in twee btw-tarieven krijgt per tarief een regel."
+                   + (f" Nieuw in deze maand: {', '.join(dict.fromkeys(r.categorie for r in nieuw))}; "
+                      "vul de grootboekrekening in." if nieuw else ""))
+        df = pd.DataFrame([{"Kassacategorie": r.categorie, "Btw": f"{r.tarief}%", "Omschrijving": r.omschrijving,
+                            "Grootboek": r.rekening, "Incl. btw": euro_nl(r.bruto), "Btw-bedrag": euro_nl(r.btw),
+                            "Status": "" if r.bekend else "Nieuw"} for r in voorstel])
+        bewerkt = st.data_editor(
+            df, key=f"oz_editor_{sig}_{sleutel}", hide_index=True, width="stretch", num_rows="fixed",
+            disabled=["Kassacategorie", "Btw", "Incl. btw", "Btw-bedrag", "Status"],
+            column_config={
+                "Omschrijving": st.column_config.TextColumn(width="medium", help="Komt na 'Omzet <periode>' in de boeking"),
+                "Grootboek": st.column_config.TextColumn(validate=r"^\d+$", help="Rekeningnummer in Asperion"),
+                "Incl. btw": st.column_config.TextColumn(alignment="right"),
+                "Btw-bedrag": st.column_config.TextColumn(alignment="right")})
+    for r, (_, rij) in zip(voorstel, bewerkt.iterrows()):
+        r.omschrijving = str(rij["Omschrijving"] or "").strip() or r.categorie
+        r.rekening = str(rij["Grootboek"] or "").strip()
+
+    # Boekstuk en tegenrekeningen (onderaan de pagina)
+    with st.expander("Boekstuk en tegenrekeningen", icon=":material/tune:"):
+        c1, c2 = st.columns(2)
+        prefix = c1.text_input("Boekstukprefix", value=str(koppeling.get("boekstuk_prefix") or ""),
+                               placeholder=f"automatisch: {prefix_uit_naam(dag.bedrijf)}", key=f"oz_prefix_{sleutel}",
+                               help="Boekstuknummer = prefix + maand + jaar, bijvoorbeeld BELL1026.")
+        dagboek = c2.text_input("Dagboek", value=str(koppeling.get("dagboek") or "10"), key=f"oz_dagboek_{sleutel}")
+        st.caption("Tegenrekeningen")
+        kol, teg = st.columns(4), {}
+        for i, (s, label) in enumerate(TEGENREKENING_LABELS.items()):
+            teg[s] = kol[i % 4].text_input(label, value=str(koppeling["tegenrekeningen"].get(s, "")),
+                                           key=f"oz_teg_{s}_{sleutel}").strip()
+    koppeling = {**koppeling, "boekstuk_prefix": prefix.strip(), "dagboek": dagboek.strip() or "10",
+                 "tegenrekeningen": teg}
+    b = maak_boeking(dag, prod, voorstel, koppeling)
+    nieuwe_koppeling = json.dumps(bewaar_koppeling(koppeling, voorstel), indent=2, ensure_ascii=False)
+
+    with kop:
+        st.html(f'<div class="jb-hero"><div><div class="jb-hero-titel">Omzet {MAANDEN[b.eind.month - 1]} '
+                f'{b.eind.year} · {html.escape(b.bedrijf)}</div><div class="jb-hero-sub">Boekstuk {html.escape(b.boekstuk)}'
+                f' · dagboek {html.escape(b.dagboek)} · {len(b.regels) - 1} boekingsregels · boekingsdatum '
+                f'{b.eind:%d-%m-%Y}</div></div></div>')
+        d1, d2, d3 = st.columns([1.2, 1.2, 1])
+        d1.download_button("Download boeking (CSV)", b"" if b.fout else naar_fmutac(b), b.bestandsnaam, "text/csv",
+                           type="primary", width="stretch", icon=":material/download:", disabled=b.fout)
+        d2.download_button("Download koppeling", nieuwe_koppeling.encode("utf-8"),
+                           f"omzet_koppeling_{_slug(b.bedrijf)}.json", "application/json", width="stretch",
+                           icon=":material/file_download:",
+                           help="Koppeltabel en instellingen; upload hem volgende maand bij stap 2.")
+        if CONTAINER:
+            d3.caption("Op de server wordt niets bewaard: download de koppeling en upload hem volgende maand weer.")
+        elif d3.button("Bewaar koppeling", width="stretch", icon=":material/save:",
+                       help=f"Bewaart koppeltabel en instellingen voor {b.bedrijf}; volgende maand worden ze "
+                            "automatisch gebruikt."):
+            OMZET_KLANTEN.mkdir(parents=True, exist_ok=True)
+            (OMZET_KLANTEN / f"{_slug(b.bedrijf)}.json").write_text(nieuwe_koppeling + "\n", encoding="utf-8")
+            st.toast(f"Koppeling bewaard voor {b.bedrijf}", icon=":material/check_circle:")
+        if b.fout:
+            st.error("Nog niet te downloaden. " + " · ".join(f"{c['controle']}: {c['detail']}"
+                                                             for c in b.controles if c["status"] == "FOUT"),
+                     icon=":material/error:")
+        m = st.columns(4)
+        m[0].metric("Omzet incl. btw", euro_nl(b.omzet_bruto))
+        m[1].metric("Btw", euro_nl(b.omzet_btw))
+        m[2].metric("Betalingen", euro_nl(b.betalingen))
+        m[3].metric("Verschil", euro_nl(b.verschil), help="Sluitpost: betalingen min omzet incl. btw, fooi en "
+                                                            "overige inkomsten.")
+        st.write("")
+
+    let_op = sum(c["status"] == "LET OP" for c in b.controles)
+    with controle_plek, st.expander(f"Controles · {let_op} let op" if let_op and not b.fout else "Controles",
+                                    expanded=b.fout, icon=":material/error:" if b.fout else ":material/task_alt:"):
+        st.dataframe(controletabel(b.controles), hide_index=True, width="stretch",
+                     column_config={"Detail": st.column_config.TextColumn(width="large")})
+
+    with regels_plek, st.expander(f"Boekingsregels · {len(b.regels) - 1}", expanded=True,
+                                  icon=":material/receipt_long:"):
+        st.dataframe(pd.DataFrame([{"Nr": i, "Omschrijving": r.omschrijving, "Rekening": r.rekening,
+                                    "Bedrag": euro_nl(r.bedrag), "Btw-code": r.btw_code, "Btw": euro_nl(r.btw_bedrag)}
+                                   for i, r in enumerate(b.regels)]),
+                     hide_index=True, width="stretch",
+                     column_config={"Omschrijving": st.column_config.TextColumn(width="large"),
+                                    "Bedrag": st.column_config.TextColumn(alignment="right"),
+                                    "Btw": st.column_config.TextColumn(alignment="right")})
+
+
 # --------------------------------------------------------------------------
 # Zijbalk
 # --------------------------------------------------------------------------
@@ -221,7 +406,7 @@ if WACHTWOORD and not st.session_state.get("toegang"):
 kantoor = laad_kantoor(KANTOOR_PAD)
 with st.sidebar:
     st.html('<div class="jb-merk"><div class="jb-logo">J</div><div><div class="jb-naam">Jaarboek</div>'
-            '<div class="jb-ondertitel">Jaarverslag uit de Asperion-balans</div></div></div>')
+            f'<div class="jb-ondertitel">{ONDERTITEL[st.session_state.get("onderdeel", JAARVERSLAG)]}</div></div></div>')
     if NEP_AI:
         st.html('<span class="jb-status demo"><span class="jb-stip"></span>Demo · Claude nagebootst</span>')
         ai = claude(kantoor)
@@ -235,9 +420,16 @@ with st.sidebar:
                           label_visibility="collapsed")
             st.caption("Alleen gebruikt in deze sessie; niet opgeslagen.")
         ai = claude(kantoor)
+    onderdeel = st.radio("Onderdeel", [JAARVERSLAG, OMZET], key="onderdeel",
+                         captions=["Uit oud jaarverslag en nieuwe balans", "Kassa-omzet als FMUTAC-CSV"])
     gebruik_plek = st.empty()
     st.caption(f"Claude Opus 5.5 · effort {kantoor['ai_effort']}")
     st.html(f'<div class="jb-kantoor"><img alt="PFC" src="{kantoor_logo()}"></div>')
+
+if onderdeel == OMZET:
+    pagina_omzet()
+    toon_gebruik(ai)
+    st.stop()
 
 
 # --------------------------------------------------------------------------
@@ -374,8 +566,4 @@ if res:
 
 
 # Gebruik in de zijbalk (als laatste, zodat deze run meetelt)
-if ai:
-    t = ai.totaal
-    demo = " (schatting)" if NEP_AI else ""
-    gebruik_plek.html(f'<div class="jb-gebruik">Deze sessie{demo}<br><b>{dollar(t["kosten_usd"])}</b> · '
-                      f'{fmt(t["input_tokens"] + t["output_tokens"])} tokens · {t["verzoeken"]} verzoek(en)</div>')
+toon_gebruik(ai)
