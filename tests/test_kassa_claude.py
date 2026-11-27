@@ -15,7 +15,8 @@ from nep_claude import NepClaude
 
 from jaarboek.ai import ClaudeAI
 from jaarboek.kassa_claude import lees_met_claude, naar_kassaomzet, staat_in, tekst_van_bestanden
-from jaarboek.omzet import OmzetFout, asperion_weergave, koppeling_uit_json, maak_boeking, stel_koppeling_voor
+from jaarboek.omzet import (OmzetFout, asperion_weergave, koppeling_uit_json, maak_boeking, naar_fmutac,
+                            stel_koppeling_voor)
 
 D = Decimal
 NINJA = DATA / "ninja_boekhouding_2026-01.pdf"
@@ -126,3 +127,17 @@ def test_v_pay_is_een_pinbetaling():
     from jaarboek.omzet import soort_betaling
     assert {soort_betaling(n) for n in ("V-pay", "V PAY", "vpay", "Visa Debit", "Eurocard Mastercard")} == {"pin"}
     assert soort_betaling("DIsh Giftcard") == "cadeaubonnen" and soort_betaling("Klearly contant") == "contant"
+
+
+def test_claude_per_categorie_zonder_tarief_is_gelijk_aan_de_boekhouder():
+    """Geeft het rapport geen tarief per categorie, dan levert Claude de categorieën zonder tarief; de koppeling
+    (vast tarief + restpost) maakt er dezelfde boeking van als de vaste booq-lezer."""
+    pdf = DATA / "bica_omzet_2026-10.pdf"
+    nep = NepClaude(kassa=_opname_pad("kassa_claude_bica_categorieen.json"))
+    kassa = lees_met_claude([(pdf.name, pdf.read_bytes())], ClaudeAI(client=nep))
+    schema = nep.verzoeken[0]["output_config"]["format"]["schema"]
+    assert {"type": "null"} in schema["properties"]["omzet"]["items"]["properties"]["tarief"]["anyOf"]
+    assert all(o.tarief is None for o in kassa.omzet)
+    b = _boeking(kassa, "cafe_bica")
+    assert not b.fout, [c for c in b.controles if c["status"] == "FOUT"]
+    assert naar_fmutac(b) == (DATA / "bica_omzet_2026-10_verwacht.csv").read_bytes()

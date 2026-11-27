@@ -35,7 +35,8 @@ SCHEMA = {
         "omzet": {"type": "array", "items": {
             "type": "object", "additionalProperties": False,
             "required": ["groep", "tarief", "incl_btw", "btw", "afgeleid"],
-            "properties": {"groep": {"type": "string"}, "tarief": {"type": "integer"},
+            "properties": {"groep": {"type": "string"},
+                           "tarief": {"anyOf": [{"type": "integer"}, {"type": "null"}]},   # null: niet in het rapport
                            "incl_btw": GETAL, "btw": GETAL, "afgeleid": {"type": "boolean"}}}},
         "betalingen": {"type": "array", "items": {
             "type": "object", "additionalProperties": False, "required": ["betaalwijze", "bedrag", "afgeleid"],
@@ -54,11 +55,13 @@ SCHEMA = {
 SYSTEM = """Je zet het maandrapport van een horeca-kassasysteem om naar gegevens voor één omzetboeking in de \
 boekhouding. De boekhouder boekt alleen de omzet (credit) en de betalingen (debet); wat de betalingen meer of \
 minder zijn dan de omzet, komt als verschil op een vaste rekening. Regels:
-- omzet: één regel per OMZETCATEGORIE van het rapport (niet per product) en per btw-tarief; een categorie met \
-omzet in twee tarieven krijgt twee regels. Heeft het rapport geen categorieën, staat er niet bij welk tarief een \
-categorie heeft, of tellen de categorieën niet op tot het btw-overzicht, maak dan één regel per tarief met groep \
-"Omzet <tarief>%" en de bedragen uit het btw-overzicht. incl_btw = bedrag inclusief btw, btw = btw-bedrag zoals \
-in het rapport (0 als het er niet staat).
+- omzet: één regel per OMZETCATEGORIE van het rapport (niet per product), op het laagste niveau: zijn \
+categorieën gegroepeerd in hoofdgroepen die alleen hun subcategorieën optellen, neem dan de subcategorieën. Laat \
+categorieën zonder omzet weg. Per btw-tarief een regel; een categorie met omzet in twee tarieven krijgt twee regels. \
+Staat er niet bij welk btw-tarief een categorie heeft, geef dan per categorie één regel met tarief null, het \
+bedrag uit het rapport als incl_btw en btw 0; de boekhouder koppelt het tarief zelf. Alleen als het rapport \
+helemaal geen categorieën heeft: één regel per tarief met groep "Omzet <tarief>%" en de bedragen uit het \
+btw-overzicht. incl_btw = bedrag inclusief btw, btw = btw-bedrag zoals in het rapport (0 als het er niet staat).
 - Neem bedragen letterlijk over. Moet je een bedrag uitrekenen (optellen, basisbedrag + btw, splitsen), zet dan \
 afgeleid=true. Verzin nooit bedragen.
 - betalingen: elke betaalwijze met het ontvangen bedrag, op het laagste detailniveau, ook betalingen met \
@@ -174,8 +177,9 @@ def naar_kassaomzet(r: dict, tekst: str, namen: list[str]) -> Kassaomzet:
     van, tot = _iso(r["periode_van"], "begindatum"), _iso(r["periode_tot"], "einddatum")
     if van.day == 1 and tot.day == 1 and tot > van and (tot - van).days >= 27:
         tot -= timedelta(days=1)                         # 1-9 t/m 1-10 (kassadag tot de volgende dag) = september
-    omzet = [Omzetpost(str(o["groep"]).strip() or f"Omzet {o['tarief']}%", int(o["tarief"]), _d(o["incl_btw"]),
-                       _d(o["btw"]), bool(o["afgeleid"])) for o in r["omzet"]]
+    omzet = [Omzetpost(str(o["groep"]).strip() or f"Omzet {o['tarief']}%",
+                       None if o["tarief"] is None else int(o["tarief"]), _d(o["incl_btw"]), _d(o["btw"]),
+                       bool(o["afgeleid"])) for o in r["omzet"]]
     betalingen = [Betaalpost(str(b["betaalwijze"]).strip(), _d(b["bedrag"]), soort_betaling(b["betaalwijze"]))
                   for b in r["betalingen"] if _d(b["bedrag"])]
     totalen = {int(t["tarief"]): (_d(t["incl_btw"]), _d(t["btw"])) for t in r["rapport_totalen"]}
@@ -184,7 +188,8 @@ def naar_kassaomzet(r: dict, tekst: str, namen: list[str]) -> Kassaomzet:
     # Geboekte bedragen (en het btw-overzicht waartegen gecontroleerd wordt) moeten in het rapport staan
     controles: list[dict] = []
     schoon = re.sub(r"\s+", " ", tekst)
-    posten = [(f"omzet {o.groep} {o.tarief}%", o.bruto, o.btw or NUL, o.afgeleid) for o in omzet if o.bruto]
+    posten = [(f"omzet {o.groep}" + ("" if o.tarief is None else f" {o.tarief}%"), o.bruto, o.btw or NUL, o.afgeleid)
+              for o in omzet if o.bruto]
     posten += [(f"btw-overzicht {t['tarief']}%", _d(t["incl_btw"]), _d(t["btw"]), bool(t["afgeleid"]))
                for t in r["rapport_totalen"] if _d(t["incl_btw"])]
     posten += [(f"betaling {b['betaalwijze']}", _d(b["bedrag"]), NUL, bool(b["afgeleid"]))
