@@ -2,9 +2,12 @@
   "versie": 1,
   "boekstuk_prefix": "",
   "dagboek": "10",
+  "stijl": "uitgebreid",
+  "omschrijving": "Omzet {periode}",
   "tegenrekeningen": {
     "pin": "1255",
     "contant": "1255",
+    "online": "1255",
     "op_rekening": "1001",
     "reserveringen": "1001",
     "cadeaubonnen": "1003",
@@ -39,6 +42,11 @@
     {"categorie": "Bites", "tarief": "", "omschrijving": "Bites", "rekening": "8100"},
     {"categorie": "Kindermenu", "tarief": "", "omschrijving": "Kindermenu", "rekening": "8100"},
     {"categorie": "Eten", "tarief": "", "omschrijving": "Eten", "rekening": "8100"},
-    {"categorie": "Food", "tarief": "", "omschrijving": "Food", "rekening": "8100"}
-  ]
+    {"categorie": "Food", "tarief": "", "omschrijving": "Food", "rekening": "8100"},
+    {"categorie": "Nagrechten", "tarief": "", "omschrijving": "Nagrechten", "rekening": "8100"},
+    {"categorie": "Sauzes", "tarief": "", "omschrijving": "Sauzes", "rekening": "8100"},
+    {"categorie": "Omzet 9%", "tarief": "", "omschrijving": "Omzet 9%", "rekening": "8100"},
+    {"categorie": "Omzet 21%", "tarief": "", "omschrijving": "Omzet 21%", "rekening": "8000"}
+  ],
+  "betaalwijzen": []
 }

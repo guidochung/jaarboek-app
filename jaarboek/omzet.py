@@ -1,27 +1,31 @@
 """Kassa-omzet van een maand -> één kasboekboeking voor Asperion (FMUTAC-CSV).
 
-Invoer: het dagrapport (betaalwijzen, fooi, overige inkomsten) en het productrapport
-(omzet per kassacategorie en btw-tarief) uit het kassasysteem, beide als Excel.
+Elk kassasysteem levert andere rapporten. Een lezer zet ze om naar één tussenformaat, `Kassaomzet`:
+omzet per kassacategorie (of per btw-tarief) incl. btw, betalingen per betaalwijze, fooi, overige
+inkomsten en het btw-overzicht van het rapport zelf. Vaste lezers voor bekende kassa's staan in
+kassalezers.py; een onbekend formaat kan Claude lezen (kassa_claude.py). Vanaf het tussenformaat is
+alles hetzelfde: koppeling naar grootboekrekeningen, boekingsregels, controles en de CSV.
 
-Per kassacategorie en btw-tarief komt er één omzetregel: bedrag incl. btw, btw-code en
-btw-bedrag, op de grootboekrekening uit de koppeltabel. De tegenkant (pin, contant, op
-rekening, reserveringen, cadeaubonnen) en de fooi komen uit het dagrapport. Wat dan nog
-overblijft om de boeking op nul te laten sluiten, wordt de regel 'verschil'.
+Per omzetregel: bedrag incl. btw, btw-code en btw-bedrag. Het btw-bedrag is incl. × tarief / (100 + tarief)
+op centen, zoals het kantoor en Asperion rekenen (niet de btw uit de kassa, die per bon afrondt). De
+tegenkant zijn de betalingen en de fooi; wat overblijft om op nul te sluiten is de regel 'verschil'.
 
-Alles is gewone rekenkunde: geen AI. Plus- en mintekens en kolommen zijn precies zoals in
-de boeking die het kantoor in Asperion inleest (zie tests/test_omzet.py).
+Twee boekingsstijlen (per klant in de koppeling):
+- uitgebreid: kopregel, elke betaalwijze apart, fooi, verschil, omzetregels (zoals Bar Bellini);
+- compact: omzetregels, daarna de tegenkant samengevoegd per tegenrekening; overal dezelfde omschrijving.
+
+Alles is gewone rekenkunde. Plus- en mintekens en kolommen zijn precies zoals in de boeking die het
+kantoor in Asperion inleest (zie tests/test_omzet.py).
 """
 from __future__ import annotations
 
 import copy
-import io
 import json
 import re
 import unicodedata
-import warnings
 from collections import defaultdict
-from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from dataclasses import dataclass, field, replace
+from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
@@ -31,227 +35,129 @@ from .structuur import MAANDEN
 STANDAARD_KOPPELING = BASIS / "omzet_koppeling.json"
 CENT = Decimal("0.01")
 NUL = Decimal("0")
-MARGE = Decimal("0.05")           # afrondingsruimte tussen product- en dagrapport
+MARGE = Decimal("0.05")           # afrondingsruimte tussen omzetregels en het btw-overzicht van de kassa
 AANTAL_KOLOMMEN = 40              # FMUTAC-regel: 40 velden, gescheiden door ';'
+STIJLEN = {"uitgebreid": "Uitgebreid: elke betaalwijze apart, omschrijving per regel",
+           "compact": "Compact: tegenkant per tegenrekening, overal dezelfde omschrijving"}
 
-# Tegenkant uit het dagrapport: (sleutel tegenrekening, omschrijving, kolom in dagrapport)
-BETALINGEN = [
-    ("pin", "pinbetalingen", "total card"),
-    ("contant", "contant", "total cash"),
-    ("op_rekening", "op rekening", "total on invoice"),
-    ("reserveringen", "reserveringen", "reservations checked-in today"),
-    ("cadeaubonnen", "cadeaubonnen", "gift cards sold"),
-]
+# Standaardsoorten betalingen (tegenrekening uit 'tegenrekeningen' in de koppeling) en overige tegenposten
 TEGENREKENING_LABELS = {
-    "pin": "Pinbetalingen", "contant": "Contant", "op_rekening": "Op rekening",
+    "pin": "Pin / kaart", "contant": "Contant", "online": "Online / bezorgplatforms", "op_rekening": "Op rekening",
     "reserveringen": "Reserveringen", "cadeaubonnen": "Cadeaubonnen", "fooi": "Fooi",
     "overige_inkomsten": "Overige inkomsten", "verschil": "Verschil",
 }
-NODIG_DAG = [k for _, _, k in BETALINGEN] + ["total tip", "total other income"]
-# Kolommen die de boeking zouden veranderen maar niet in het voorbeeld zitten:
-# staat hier een bedrag, dan komt dat in het verschil terecht en melden we het.
-NIET_GEBOEKT = ["payment surcharge", "total pre-paid", "total external payments",
-                "total invoices paid by external", "gift card payments", "cash expenses", "bad debt",
-                "tips settled from cash", "total difference", "card difference", "cash difference"]
-
-_MAAND_AFK = {"jan": 1, "feb": 2, "mar": 3, "mrt": 3, "apr": 4, "may": 5, "mei": 5, "jun": 6, "jul": 7,
-              "aug": 8, "sep": 9, "oct": 10, "okt": 10, "nov": 11, "dec": 12}
+BETAALSOORTEN = ["pin", "contant", "online", "op_rekening", "reserveringen", "cadeaubonnen"]
 
 
 class OmzetFout(Exception):
     """Invoer is niet te verwerken; de melding is bedoeld voor de gebruiker."""
 
 
+class OnbekendFormaat(OmzetFout):
+    """Geen vaste lezer voor dit kassaformaat (Claude kan het proberen)."""
+
+
+class OnvolledigeInvoer(OmzetFout):
+    """Het formaat is bekend, maar er ontbreekt nog een rapport. De melding zegt welk."""
+
+
 # --------------------------------------------------------------------------
-# Inlezen
+# Tussenformaat
 # --------------------------------------------------------------------------
 @dataclass
-class Dagrapport:
+class Omzetpost:
+    groep: str                      # kassacategorie, of 'Omzet 9%' als het rapport alleen tarieven geeft
+    tarief: int
+    bruto: Decimal                  # incl. btw
+    btw: Decimal | None = None      # btw volgens het rapport (alleen ter informatie)
+    afgeleid: bool = False          # uitgerekend, staat niet letterlijk in het rapport
+
+
+@dataclass
+class Betaalpost:
+    naam: str                       # zoals in het rapport, bijv. 'Maestro' of 'Contant'
+    bedrag: Decimal
+    soort: str = ""                 # standaardsoort (BETAALSOORTEN) of '' als onbekend
+    omschrijving: str = ""          # tekst in de uitgebreide boekingsstijl, bijv. 'pinbetalingen'
+
+
+@dataclass
+class Kassaomzet:
     bedrijf: str
     start: date
-    eind: date
-    totalen: dict[str, Decimal]          # kolomnaam (genormaliseerd) -> som over alle dagen
-    dagen: int
-    naam: str = ""
-
-
-@dataclass
-class Categorie:
-    naam: str
-    netto: dict[int, Decimal] = field(default_factory=lambda: defaultdict(Decimal))
-    bruto: dict[int, Decimal] = field(default_factory=lambda: defaultdict(Decimal))
-    producten: int = 0
-
-
-@dataclass
-class Productrapport:
-    bedrijf: str
-    start: date
-    eind: date
-    categorieen: list[Categorie]
-    naam: str = ""
+    eind: date                      # laatste dag van de periode = boekingsdatum
+    lezer: str                      # welk formaat, en hoe gelezen
+    omzet: list[Omzetpost]
+    betalingen: list[Betaalpost]
+    fooi: Decimal = NUL             # fooi die in de betalingen zit (wordt apart geboekt)
+    overige: Decimal = NUL          # overige inkomsten die in de betalingen zitten
+    totalen: dict[int, tuple[Decimal, Decimal]] = field(default_factory=dict)   # btw-overzicht: tarief -> (incl., btw)
+    totalen_bron: str = "btw-overzicht"
+    niet_geboekt: list[tuple[str, Decimal]] = field(default_factory=list)       # posten die niet in de boeking komen
+    controles: list[dict] = field(default_factory=list)                          # controles van de lezer zelf
+    opmerkingen: list[str] = field(default_factory=list)
+    bestanden: list[str] = field(default_factory=list)
+    dagen: int = 0
+    door_claude: bool = False
 
 
 def _norm(s) -> str:
     return " ".join(str(s).split()).casefold() if s is not None else ""
 
 
-def _getal(w) -> bool:
-    return isinstance(w, (int, float)) and not isinstance(w, bool)
-
-
-def _dec(w) -> Decimal:
-    return Decimal(str(w)) if _getal(w) else NUL
-
-
 def euro_centen(x: Decimal) -> Decimal:
     return Decimal(x).quantize(CENT, rounding=ROUND_HALF_UP)
 
 
-def _datum(w, naam: str) -> date:
-    if isinstance(w, datetime):
-        return w.date()
-    if isinstance(w, date):
-        return w
-    s = str(w or "").strip()
-    if m := re.match(r"([A-Za-z]{3})[A-Za-z]*\.?\s+(\d{1,2}),?\s+(\d{4})", s):          # Oct 1, 2026
-        if m[1].lower() in _MAAND_AFK:
-            return date(int(m[3]), _MAAND_AFK[m[1].lower()], int(m[2]))
-    if m := re.match(r"(\d{1,2})\s+([A-Za-z]{3})[A-Za-z]*\.?\s+(\d{4})", s):            # 1 okt. 2026
-        if m[2].lower() in _MAAND_AFK:
-            return date(int(m[3]), _MAAND_AFK[m[2].lower()], int(m[1]))
-    if m := re.match(r"(\d{4})-(\d{1,2})-(\d{1,2})", s):
-        return date(int(m[1]), int(m[2]), int(m[3]))
-    if m := re.match(r"(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})", s):
-        return date(int(m[3]), int(m[2]), int(m[1]))
-    raise OmzetFout(f"{naam}: datum '{s}' niet herkend.")
+def btw_uit_bruto(bruto: Decimal, tarief: int) -> Decimal:
+    return euro_centen(Decimal(bruto) * tarief / (100 + tarief)) if tarief else NUL
 
 
-def lees_kassarapport(bron, naam: str = "") -> Dagrapport | Productrapport:
-    """Lees een dag- of productrapport (Excel). `bron` is een pad, bytes of een bestand."""
-    import openpyxl
-
-    naam = naam or (Path(bron).name if isinstance(bron, (str, Path)) else "rapport")
-    if isinstance(bron, (bytes, bytearray)):
-        bron = io.BytesIO(bron)
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")              # "Workbook contains no default style"
-            wb = openpyxl.load_workbook(bron, data_only=True, read_only=True)
-            rijen = [tuple(r) for r in wb.worksheets[0].iter_rows(values_only=True)]
-            wb.close()
-    except Exception as e:                               # noqa: BLE001 - kapot of geen Excel
-        raise OmzetFout(f"{naam}: kan dit Excel-bestand niet openen ({e}).") from None
-    if not rijen or not rijen[0]:
-        raise OmzetFout(f"{naam}: het bestand is leeg.")
-
-    titel = _norm(rijen[0][0])
-    bedrijf = str(rijen[0][1] or "").strip() if len(rijen[0]) > 1 else ""
-    meta = {_norm(r[0]): r[1] for r in rijen[:12] if r and len(r) > 1 and r[0] is not None}
-    start = meta.get("start date", meta.get("startdatum"))
-    eind = meta.get("end date", meta.get("einddatum"))
-    if start is None or eind is None:
-        raise OmzetFout(f"{naam}: start- en einddatum niet gevonden bovenin het rapport.")
-    start, eind = _datum(start, naam), _datum(eind, naam)
-
-    if titel in ("day report", "dagrapport"):
-        return _lees_dag(rijen, bedrijf, start, eind, naam)
-    if titel in ("product report", "productrapport"):
-        return _lees_product(rijen, bedrijf, start, eind, naam)
-    raise OmzetFout(f"{naam}: geen dag- of productrapport (cel A1 is '{rijen[0][0]}').")
+def controle(lijst: list, status: str, naam: str, detail: str) -> None:
+    lijst.append({"status": status, "controle": naam, "detail": detail})
 
 
-def _lees_dag(rijen, bedrijf, start, eind, naam) -> Dagrapport:
-    kop, totalen, dagen = None, defaultdict(Decimal), 0
-    for r in rijen:
-        if not r:
-            continue
-        if _norm(r[0]) in ("day", "dag"):
-            kop = [_norm(c) for c in r]
-            continue
-        if kop and (_getal(r[0]) or isinstance(r[0], (date, datetime))):
-            dagen += 1
-            for k, w in zip(kop, r):
-                if k and _getal(w):
-                    totalen[k] += _dec(w)
-    if not kop or not dagen:
-        raise OmzetFout(f"{naam}: geen dagregels gevonden in het dagrapport.")
-    mist = [k for k in NODIG_DAG if k not in kop]
-    if mist:
-        raise OmzetFout(f"{naam}: kolom(men) ontbreken in het dagrapport: {', '.join(mist)}.")
-    return Dagrapport(bedrijf, start, eind, dict(totalen), dagen, naam)
+def soort_betaling(naam: str) -> str:
+    """Raad de standaardsoort van een betaalwijze uit de naam in het rapport ('' als onbekend)."""
+    n = _norm(naam)
+    if re.search(r"contant|\bcash\b|\bkas\b", n):
+        return "contant"
+    if re.search(r"op rekening|on invoice|op factuur|\binvoice", n):
+        return "op_rekening"
+    if re.search(r"cadeau|gift", n):
+        return "cadeaubonnen"
+    if re.search(r"reserver", n):
+        return "reserveringen"
+    if re.search(r"\bpin\b|card|kaart|maestro|master|visa|amex|american express|v ?pay|debit|bancontact|"
+                 r"apple pay|google pay|payconiq|\bpsp\b", n):              # betaalwijze gaat voor kanaal
+        return "pin"
+    if re.search(r"online|ideal|web|thuisbezorgd|uber|deliveroo|e-?commerce|just eat", n):
+        return "online"
+    return ""
 
 
-def _lees_product(rijen, bedrijf, start, eind, naam) -> Productrapport:
-    cats: list[Categorie] = []
-    titel, kolommen, cat = None, None, None
-    for r in rijen[1:]:
-        if not r or r[0] is None or str(r[0]).strip() == "":
-            continue
-        eerste = _norm(r[0])
-        if eerste == "name":
-            kolommen = {}
-            for i, c in enumerate(r):
-                if m := re.fullmatch(r"(net|gross) amount vat (\d+)%", _norm(c)):
-                    kolommen[i] = (m[1], int(m[2]))
-            if not kolommen:
-                raise OmzetFout(f"{naam}: kolommen 'Net/Gross Amount VAT' niet gevonden.")
-            cat = next((c for c in cats if c.naam == titel), None)
-            if cat is None:
-                cat = Categorie(str(titel or "Zonder categorie").strip())
-                cats.append(cat)
-            continue
-        if all(c is None or str(c).strip() == "" for c in r[1:]):
-            titel, cat = r[0], None                      # kop van een nieuwe categorie
-            continue
-        if eerste in ("total", "grand total", "totaal"):
-            cat = None
-            continue
-        if cat is not None:
-            cat.producten += 1
-            netto = defaultdict(Decimal)
-            for i, (soort, t) in kolommen.items():
-                w = _dec(r[i]) if i < len(r) else NUL
-                (cat.bruto if soort == "gross" else netto)[t] += w
-            for t, w in netto.items():
-                cat.netto[t] += w
-                if not any(s == "gross" and tt == t for s, tt in kolommen.values()):
-                    cat.bruto[t] += w                    # tarief zonder bruto-kolom (0%)
-    if not cats:
-        raise OmzetFout(f"{naam}: geen categorieën gevonden in het productrapport.")
-    return Productrapport(bedrijf, start, eind, cats, naam)
-
-
-def lees_kassarapporten(bronnen) -> tuple[Dagrapport, Productrapport]:
-    """`bronnen`: lijst (naam, pad-of-bytes). Volgorde maakt niet uit."""
-    dag, prod = [], []
-    for naam, bron in bronnen:
-        r = lees_kassarapport(bron, naam)
-        (dag if isinstance(r, Dagrapport) else prod).append(r)
-    if len(dag) != 1 or len(prod) != 1:
-        delen = []
-        if len(dag) != 1:
-            delen.append(f"{len(dag)} dagrapport(en)")
-        if len(prod) != 1:
-            delen.append(f"{len(prod)} productrapport(en)")
-        raise OmzetFout("Upload precies één dagrapport en één productrapport (nu: " + ", ".join(delen) + ").")
-    return dag[0], prod[0]
+def bedrijfsnaam(naam: str) -> str:
+    """'Bar Bellini, Bar Bellini' -> 'Bar Bellini' (dubbele delen weg)."""
+    delen = [d.strip() for d in str(naam or "").split(",") if d.strip()]
+    uniek = list(dict.fromkeys(delen))
+    return ", ".join(uniek) if len(uniek) < len(delen) else str(naam or "").strip()
 
 
 # --------------------------------------------------------------------------
-# Koppeling kassacategorie -> grootboek
+# Koppeling kassacategorie / betaalwijze -> grootboek
 # --------------------------------------------------------------------------
 def laad_koppeling(pad: Path | None = None) -> dict:
     return json.loads(Path(pad or STANDAARD_KOPPELING).read_text(encoding="utf-8"))
 
 
 def koppeling_uit_json(tekst: str | bytes) -> dict:
-    """Een geüploade koppeling: ontbrekende onderdelen komen uit de standaard."""
+    """Een geüploade of bewaarde koppeling: ontbrekende onderdelen komen uit de standaard."""
     try:
         data = json.loads(tekst)
     except ValueError as e:
         raise OmzetFout(f"Koppeling is geen geldige JSON ({e}).") from None
-    if not isinstance(data, dict) or not isinstance(data.get("categorieen", []), list):
+    if not isinstance(data, dict) or not isinstance(data.get("categorieen", []), list) \
+            or not isinstance(data.get("betaalwijzen", []), list):
         raise OmzetFout("Koppeling heeft niet de verwachte vorm (verwacht: 'categorieen' als lijst).")
     basis = laad_koppeling()
     for k, v in data.items():
@@ -268,6 +174,12 @@ def koppeling_uit_json(tekst: str | bytes) -> dict:
         c.setdefault("omschrijving", c["categorie"])
         c.setdefault("rekening", "")
         c["tarief"], c["rekening"] = str(c["tarief"] or ""), str(c["rekening"] or "")
+    for b in basis.setdefault("betaalwijzen", []):
+        if not isinstance(b, dict) or not b.get("betaalwijze"):
+            raise OmzetFout("Elke betaalwijze in de koppeling heeft minimaal een 'betaalwijze' nodig.")
+        b["rekening"] = str(b.get("rekening") or "")
+    if basis.get("stijl", "uitgebreid") not in STIJLEN:
+        raise OmzetFout(f"Onbekende boekingsstijl '{basis['stijl']}' (kies uit: {', '.join(STIJLEN)}).")
     return basis
 
 
@@ -278,42 +190,78 @@ class Koppelregel:
     omschrijving: str
     rekening: str
     bruto: Decimal                  # incl. btw, op centen
-    btw: Decimal
+    btw: Decimal                    # incl. × tarief / (100 + tarief)
     netto: Decimal
     bekend: bool                    # stond al in de koppeltabel
     gesplitst: bool                 # categorie heeft omzet in meer dan één tarief
+
+
+@dataclass
+class Betaalregel:
+    naam: str
+    soort: str
+    omschrijving: str
+    bedrag: Decimal
+    rekening: str
+    herkomst: str                   # 'koppeling', 'standaard' of 'nieuw'
 
 
 def _tarief_volgorde(t: int):
     return (t == 0, t)              # 9, 21, ..., 0 achteraan
 
 
-def stel_koppeling_voor(product: Productrapport, koppeling: dict) -> list[Koppelregel]:
+def stel_koppeling_voor(kassa: Kassaomzet, koppeling: dict) -> list[Koppelregel]:
     """Eén regel per kassacategorie en btw-tarief, met omschrijving en rekening uit de koppeling."""
     tabel = {(_norm(k["categorie"]), str(k.get("tarief") or "")): k for k in koppeling.get("categorieen", [])}
+    posten: dict[tuple[str, int], list] = {}                 # (groep, tarief) -> [naam, bruto]; volgorde blijft
+    for o in kassa.omzet:
+        sleutel = (_norm(o.groep), int(o.tarief))
+        posten.setdefault(sleutel, [o.groep, NUL])[1] += Decimal(o.bruto)
+    tarieven = defaultdict(set)
+    for (groep, t), (_, bruto) in posten.items():
+        if euro_centen(bruto):
+            tarieven[groep].add(t)
     uit = []
-    for cat in product.categorieen:
-        posten = []
-        for t in sorted(set(cat.bruto) | set(cat.netto), key=_tarief_volgorde):
-            bruto, netto = euro_centen(cat.bruto[t]), euro_centen(cat.netto[t])
-            btw = euro_centen(cat.bruto[t] - cat.netto[t])
-            if bruto or btw:
-                posten.append((t, bruto, btw, netto))
-        gesplitst = len(posten) > 1
-        for t, bruto, btw, netto in posten:
-            achter = f" {t}%" if gesplitst else ""
-            if k := tabel.get((_norm(cat.naam), str(t))):
-                oms, rek, bekend = k.get("omschrijving") or cat.naam + achter, k.get("rekening", ""), True
-            elif k := tabel.get((_norm(cat.naam), "")):
-                oms, rek, bekend = (k.get("omschrijving") or cat.naam) + achter, k.get("rekening", ""), True
-            else:
-                oms, rek, bekend = cat.naam + achter, "", False
-            uit.append(Koppelregel(cat.naam, t, oms, str(rek or "").strip(), bruto, btw, netto, bekend, gesplitst))
+    for (groep, t), (naam, bruto) in posten.items():
+        bruto = euro_centen(bruto)
+        if not bruto:
+            continue
+        gesplitst = len(tarieven[groep]) > 1
+        achter = f" {t}%" if gesplitst else ""
+        if k := tabel.get((groep, str(t))):
+            oms, rek, bekend = k.get("omschrijving") or naam + achter, k.get("rekening", ""), True
+        elif k := tabel.get((groep, "")):
+            oms, rek, bekend = (k.get("omschrijving") or naam) + achter, k.get("rekening", ""), True
+        else:
+            oms, rek, bekend = naam + achter, "", False
+        btw = btw_uit_bruto(bruto, t)
+        uit.append(Koppelregel(naam, t, oms, str(rek or "").strip(), bruto, btw, bruto - btw, bekend, gesplitst))
     return uit
 
 
-def bewaar_koppeling(koppeling: dict, regels: list[Koppelregel]) -> dict:
-    """Nieuwe koppeling met de keuzes uit `regels` erin (de oude blijft ongewijzigd)."""
+def _tegenrekeningen(koppeling: dict) -> dict:
+    return {**laad_koppeling()["tegenrekeningen"], **koppeling.get("tegenrekeningen", {})}
+
+
+def stel_betalingen_voor(kassa: Kassaomzet, koppeling: dict) -> list[Betaalregel]:
+    """Tegenrekening per betaalwijze: eerst de koppeling van de klant, dan de standaard voor de soort."""
+    tabel = {_norm(b["betaalwijze"]): str(b.get("rekening") or "").strip()
+             for b in koppeling.get("betaalwijzen", []) if isinstance(b, dict) and b.get("betaalwijze")}
+    teg = _tegenrekeningen(koppeling)
+    uit = []
+    for b in kassa.betalingen:
+        oms = b.omschrijving or b.naam.lower()
+        if _norm(b.naam) in tabel:
+            uit.append(Betaalregel(b.naam, b.soort, oms, euro_centen(b.bedrag), tabel[_norm(b.naam)], "koppeling"))
+        elif b.soort and str(teg.get(b.soort) or "").strip():
+            uit.append(Betaalregel(b.naam, b.soort, oms, euro_centen(b.bedrag), str(teg[b.soort]).strip(), "standaard"))
+        else:
+            uit.append(Betaalregel(b.naam, b.soort, oms, euro_centen(b.bedrag), "", "nieuw"))
+    return uit
+
+
+def bewaar_koppeling(koppeling: dict, regels: list[Koppelregel], betaalregels: list[Betaalregel] = ()) -> dict:
+    """Nieuwe koppeling met de keuzes uit `regels` en `betaalregels` erin (de oude blijft ongewijzigd)."""
     nieuw = copy.deepcopy(koppeling)
     lijst = nieuw.setdefault("categorieen", [])
     for r in regels:
@@ -332,6 +280,17 @@ def bewaar_koppeling(koppeling: dict, regels: list[Koppelregel]) -> dict:
         else:
             lijst.append({"categorie": r.categorie, "tarief": str(r.tarief) if r.gesplitst else "",
                           "omschrijving": r.omschrijving, "rekening": r.rekening})
+    teg = _tegenrekeningen(nieuw)
+    betaal = nieuw.setdefault("betaalwijzen", [])
+    for b in betaalregels:
+        rek = b.rekening.strip()
+        if not rek:
+            continue
+        bestaand = next((x for x in betaal if _norm(x.get("betaalwijze")) == _norm(b.naam)), None)
+        if bestaand is not None:
+            bestaand["rekening"] = rek
+        elif rek != str(teg.get(b.soort) or "").strip():          # wijkt af van de standaard voor deze soort
+            betaal.append({"betaalwijze": b.naam, "rekening": rek})
     return nieuw
 
 
@@ -345,7 +304,7 @@ class Boekregel:
     bedrag: Decimal | None = None
     btw_code: str = ""
     btw_bedrag: Decimal | None = None
-    soort: str = ""                 # kop, betaling, fooi, verschil, omzet, overig
+    soort: str = ""                 # kop, betaling, fooi, verschil, omzet, overig, tegen
 
 
 @dataclass
@@ -363,6 +322,8 @@ class Boeking:
     fooi: Decimal
     overige: Decimal
     verschil: Decimal
+    lezer: str = ""
+    stijl: str = "uitgebreid"
 
     @property
     def periode(self) -> str:
@@ -391,6 +352,18 @@ def prefix_uit_naam(bedrijf: str) -> str:
     return (kandidaten[0][:4] if kandidaten else "OMZ").upper()
 
 
+def standaard_boekstuk(kassa: Kassaomzet, koppeling: dict) -> str:
+    prefix = str(koppeling.get("boekstuk_prefix") or "").strip() or prefix_uit_naam(kassa.bedrijf)
+    return f"{prefix}{kassa.eind:%m%y}"
+
+
+def omschrijving_uit_sjabloon(sjabloon: str, kassa: Kassaomzet) -> str:
+    """'Omzet {periode}' -> 'Omzet 2026-01'. Ook {maand}, {jaar} en {bedrijf}."""
+    waarden = {"periode": f"{kassa.eind:%Y-%m}", "maand": MAANDEN[kassa.eind.month - 1],
+               "jaar": str(kassa.eind.year), "bedrijf": kassa.bedrijf}
+    return re.sub(r"\{(periode|maand|jaar|bedrijf)\}", lambda m: waarden[m[1]], sjabloon or "Omzet {periode}").strip()
+
+
 def euro_nl(x: Decimal | None) -> str:
     """Decimal -> '€ 1.234,56'."""
     if x is None:
@@ -399,103 +372,121 @@ def euro_nl(x: Decimal | None) -> str:
     return f"€ {'-' if x < 0 else ''}{s}"
 
 
-def maak_boeking(dag: Dagrapport, product: Productrapport, regels: list[Koppelregel], koppeling: dict) -> Boeking:
-    teg = {**laad_koppeling()["tegenrekeningen"], **koppeling.get("tegenrekeningen", {})}
+def maak_boeking(kassa: Kassaomzet, regels: list[Koppelregel], koppeling: dict,
+                 betaalregels: list[Betaalregel] | None = None, boekstuk: str | None = None) -> Boeking:
+    if betaalregels is None:
+        betaalregels = stel_betalingen_voor(kassa, koppeling)
+    teg = _tegenrekeningen(koppeling)
     btw_codes = {str(k): str(v) for k, v in koppeling.get("btw_codes", {}).items()}
-    bedrijf = dag.bedrijf or product.bedrijf
-    p = f"{dag.eind:%Y-%m}"
-    prefix = str(koppeling.get("boekstuk_prefix") or "").strip() or prefix_uit_naam(bedrijf)
-    boekstuk = f"{prefix}{dag.eind:%m%y}"
-    T = dag.totalen
+    stijl = koppeling.get("stijl") or "uitgebreid"
+    p = f"{kassa.eind:%Y-%m}"
+    boekstuk = (boekstuk or "").strip() or standaard_boekstuk(kassa, koppeling)
     controles: list[dict] = []
 
-    def controle(status, naam, detail):
-        controles.append({"status": status, "controle": naam, "detail": detail})
-
-    br: list[Boekregel] = [Boekregel(f"Omzet {MAANDEN[dag.eind.month - 1]} {dag.eind.year} {bedrijf}", soort="kop")]
-    betaald = NUL
-    for sleutel, oms, kolom in BETALINGEN:
-        bedrag = euro_centen(T.get(kolom, NUL))
-        betaald += bedrag
-        if bedrag:
-            br.append(Boekregel(f"Omzet {p} - {oms}", teg[sleutel], -bedrag, soort="betaling"))
-    fooi = euro_centen(T.get("total tip", NUL))
-    overige = euro_centen(T.get("total other income", NUL))
+    betaald = sum((b.bedrag for b in betaalregels), NUL)
+    fooi, overige = euro_centen(kassa.fooi), euro_centen(kassa.overige)
     omzet = sum((r.bruto for r in regels), NUL)
     verschil = betaald - omzet - fooi - overige
+
+    tegen = [(f"Omzet {p} - {b.omschrijving}", b.rekening.strip(), -b.bedrag, "betaling") for b in betaalregels if b.bedrag]
     if fooi:
-        br.append(Boekregel(f"Tip {p}", teg["fooi"], fooi, soort="fooi"))
+        tegen.append((f"Tip {p}", str(teg["fooi"]).strip(), fooi, "fooi"))
     if verschil:
-        br.append(Boekregel(f"Omzet {p} - verschil", teg["verschil"], verschil, soort="verschil"))
+        tegen.append((f"Omzet {p} - verschil", str(teg["verschil"]).strip(), verschil, "verschil"))
+    omzetregels = []
     for r in regels:
         code = btw_codes.get(str(r.tarief), "")
-        br.append(Boekregel(f"Omzet {p} {r.omschrijving}", r.rekening.strip(), r.bruto, code,
-                            r.btw if code else None, soort="omzet"))
-    if overige:
-        br.append(Boekregel(f"Overige inkomsten {p}", teg["overige_inkomsten"], overige, soort="overig"))
+        omzetregels.append(Boekregel(f"Omzet {p} {r.omschrijving}", r.rekening.strip(), r.bruto, code,
+                                     r.btw if code else None, soort="omzet"))
+    overig = [(f"Overige inkomsten {p}", str(teg["overige_inkomsten"]).strip(), overige, "overig")] if overige else []
+
+    if stijl == "compact":
+        oms = omschrijving_uit_sjabloon(koppeling.get("omschrijving") or "Omzet {periode}", kassa)
+        br = [Boekregel(oms, soort="kop")] + [replace(r, omschrijving=oms) for r in omzetregels]
+        samen: dict[str, Decimal] = {}
+        for _, rek, bedrag, _ in tegen + overig:
+            samen[rek] = samen.get(rek, NUL) + bedrag
+        br += [Boekregel(oms, rek, bedrag, soort="tegen") for rek, bedrag in samen.items() if bedrag]
+    else:
+        br = [Boekregel(f"Omzet {MAANDEN[kassa.eind.month - 1]} {kassa.eind.year} {kassa.bedrijf}", soort="kop")]
+        br += [Boekregel(o, rek, bedrag, soort=s) for o, rek, bedrag, s in tegen]
+        br += omzetregels
+        br += [Boekregel(o, rek, bedrag, soort=s) for o, rek, bedrag, s in overig]
 
     # -- controles --
-    zelfde = _norm(dag.bedrijf) == _norm(product.bedrijf) and (dag.start, dag.eind) == (product.start, product.eind)
-    controle("OK" if zelfde else "FOUT", "Rapporten horen bij elkaar",
-             f"{dag.bedrijf}, {dag.start:%d-%m-%Y} t/m {dag.eind:%d-%m-%Y}" if zelfde else
-             f"dagrapport: {dag.bedrijf} {dag.start:%d-%m-%Y} t/m {dag.eind:%d-%m-%Y}; productrapport: "
-             f"{product.bedrijf} {product.start:%d-%m-%Y} t/m {product.eind:%d-%m-%Y}")
-    hele_maand = (dag.start.day == 1 and (dag.start.year, dag.start.month) == (dag.eind.year, dag.eind.month)
-                  and (dag.eind + timedelta(days=1)).day == 1)
-    controle("OK" if hele_maand else "LET OP", "Periode is één hele maand",
-             f"{dag.dagen} dagen; boekingsdatum {dag.eind:%d-%m-%Y}" if hele_maand else
-             f"rapport loopt van {dag.start:%d-%m-%Y} t/m {dag.eind:%d-%m-%Y}; geboekt op {dag.eind:%d-%m-%Y}, periode {p}")
+    controles.extend(dict(c) for c in kassa.controles)
+    hele_maand = (kassa.start.day == 1 and (kassa.start.year, kassa.start.month) == (kassa.eind.year, kassa.eind.month)
+                  and (kassa.eind + timedelta(days=1)).day == 1)
+    controle(controles, "OK" if hele_maand else "LET OP", "Periode is één hele maand",
+             (f"{kassa.dagen} dagen; " if kassa.dagen else "") + f"boekingsdatum {kassa.eind:%d-%m-%Y}" if hele_maand else
+             f"rapport loopt van {kassa.start:%d-%m-%Y} t/m {kassa.eind:%d-%m-%Y}; geboekt op {kassa.eind:%d-%m-%Y}, "
+             f"periode {p}")
 
-    tarieven = sorted({r.tarief for r in regels} | {int(m[1]) for k in T if (m := re.fullmatch(r"net amount vat (\d+)%", k))},
-                      key=_tarief_volgorde)
-    for t in tarieven:
-        prod_netto = sum((r.netto for r in regels if r.tarief == t), NUL)
-        prod_btw = sum((r.btw for r in regels if r.tarief == t), NUL)
-        dag_netto = euro_centen(T.get(f"net amount vat {t}%", NUL))
-        dag_btw = euro_centen(T.get(f"tax amount vat {t}%", NUL))
-        if not (prod_netto or dag_netto or prod_btw or dag_btw):
+    bron = kassa.totalen_bron
+    if not kassa.totalen:
+        controle(controles, "LET OP", "Omzet per btw-tarief", "het rapport heeft geen btw-overzicht om de omzetregels "
+                 "tegen te controleren")
+    for t in sorted({r.tarief for r in regels} | set(kassa.totalen), key=_tarief_volgorde):
+        incl = sum((r.bruto for r in regels if r.tarief == t), NUL)
+        btw = sum((r.btw for r in regels if r.tarief == t), NUL)
+        r_incl, r_btw = (euro_centen(x) for x in kassa.totalen.get(t, (NUL, NUL)))
+        if not (incl or btw or r_incl or r_btw) or not kassa.totalen:
             continue
-        ok = abs(prod_netto - dag_netto) <= MARGE and abs(prod_btw - dag_btw) <= MARGE
-        controle("OK" if ok else "FOUT", f"Omzet {t}% gelijk aan dagrapport",
-                 f"excl. btw {euro_nl(prod_netto)} (dagrapport {euro_nl(dag_netto)}), "
-                 f"btw {euro_nl(prod_btw)} (dagrapport {euro_nl(dag_btw)})")
+        detail = (f"incl. btw {euro_nl(incl)} ({bron} {euro_nl(r_incl)}), btw {euro_nl(btw)} "
+                  f"({bron} {euro_nl(r_btw)})")
+        if abs(incl - r_incl) > MARGE:
+            status = "FOUT"
+        elif abs(btw - r_btw) > MARGE:
+            status, detail = "LET OP", detail + "; geboekt is de btw over het bedrag incl. btw, de kassa rondt per bon af"
+        else:
+            status = "OK"
+        controle(controles, status, f"Omzet {t}% gelijk aan {bron}", detail)
 
+    if not regels:
+        controle(controles, "FOUT", "Omzet gevonden", "het rapport levert geen enkele omzetregel op")
     zonder = [r for r in regels if not r.rekening.strip()]
     ongeldig = [r for r in regels if r.rekening.strip() and not re.fullmatch(r"\d+", r.rekening.strip())]
     if zonder or ongeldig:
         delen = [f"{r.categorie} {r.tarief}%: geen rekening" for r in zonder]
         delen += [f"{r.categorie} {r.tarief}%: '{r.rekening}' is geen rekeningnummer" for r in ongeldig]
-        controle("FOUT", "Elke omzetcategorie heeft een grootboekrekening", "; ".join(delen))
+        controle(controles, "FOUT", "Elke omzetcategorie heeft een grootboekrekening", "; ".join(delen))
     else:
         nieuw = [r.categorie for r in regels if not r.bekend]
-        controle("OK", "Elke omzetcategorie heeft een grootboekrekening",
+        controle(controles, "OK", "Elke omzetcategorie heeft een grootboekrekening",
                  f"{len(regels)} omzetregels" + (f"; nieuw gekoppeld: {', '.join(dict.fromkeys(nieuw))}" if nieuw else ""))
 
     zonder_code = [r for r in regels if not btw_codes.get(str(r.tarief)) and r.btw]
     nul = [r for r in regels if r.tarief == 0]
     if zonder_code:
-        controle("FOUT", "Btw-code per tarief",
+        controle(controles, "FOUT", "Btw-code per tarief",
                  "geen btw-code voor " + ", ".join(sorted({f"{r.tarief}%" for r in zonder_code})))
     elif nul:
-        controle("LET OP", "Btw-code per tarief",
+        controle(controles, "LET OP", "Btw-code per tarief",
                  "0%-omzet zonder btw-code: " + ", ".join(f"{r.categorie} {euro_nl(r.bruto)}" for r in nul))
 
-    leeg = [b.omschrijving for b in br[1:] if b.soort != "omzet" and not str(b.rekening).strip()]
-    if leeg:
-        controle("FOUT", "Tegenrekeningen ingevuld", "geen rekening bij: " + ", ".join(leeg))
+    leeg = [b.naam for b in betaalregels if b.bedrag and not b.rekening.strip()]
+    leeg += [naam for naam, bedrag, s in (("fooi", fooi, "fooi"), ("verschil", verschil, "verschil"),
+                                          ("overige inkomsten", overige, "overige_inkomsten"))
+             if bedrag and not str(teg.get(s) or "").strip()]
+    fout_nr = [b.naam for b in betaalregels if b.rekening.strip() and not re.fullmatch(r"\d+", b.rekening.strip())]
+    if leeg or fout_nr:
+        controle(controles, "FOUT", "Tegenrekeningen ingevuld",
+                 "; ".join((["geen rekening bij: " + ", ".join(leeg)] if leeg else []) +
+                           (["geen rekeningnummer bij: " + ", ".join(fout_nr)] if fout_nr else [])))
 
     som = sum((b.bedrag for b in br if b.bedrag is not None), NUL)
-    controle("OK" if som == 0 else "FOUT", "Boeking sluit op nul", f"som van alle regels {euro_nl(som)}")
-    controle("OK" if not verschil else "LET OP", "Verschil",
+    controle(controles, "OK" if som == 0 else "FOUT", "Boeking sluit op nul", f"som van alle regels {euro_nl(som)}")
+    controle(controles, "OK" if not verschil else "LET OP", "Verschil",
              f"{euro_nl(verschil)} op {teg['verschil']}: betalingen {euro_nl(betaald)} min omzet incl. btw "
              f"{euro_nl(omzet)}, fooi {euro_nl(fooi)} en overige inkomsten {euro_nl(overige)}")
-    los = [(k, euro_centen(T[k])) for k in NIET_GEBOEKT if euro_centen(T.get(k, NUL))]
-    controle("OK" if not los else "LET OP", "Overige kolommen dagrapport",
-             "geen bedragen in kolommen die niet geboekt worden" if not los else
-             "niet apart geboekt (zit in het verschil): " + ", ".join(f"{k} {euro_nl(v)}" for k, v in los))
+    los = [(k, euro_centen(v)) for k, v in kassa.niet_geboekt if euro_centen(v)]
+    controle(controles, "OK" if not los else "LET OP", "Niet geboekte posten in het rapport",
+             "geen bedragen in posten die niet geboekt worden" if not los else
+             "niet apart geboekt: " + ", ".join(f"{k} {euro_nl(v)}" for k, v in los))
 
-    return Boeking(bedrijf, dag.start, dag.eind, boekstuk, str(koppeling.get("dagboek") or "10").strip(), br,
-                   controles, omzet, sum((r.btw for r in regels), NUL), betaald, fooi, overige, verschil)
+    return Boeking(kassa.bedrijf, kassa.start, kassa.eind, boekstuk, str(koppeling.get("dagboek") or "10").strip(), br,
+                   controles, omzet, sum((r.btw for r in regels), NUL), betaald, fooi, overige, verschil,
+                   kassa.lezer, stijl)
 
 
 def naar_fmutac(boeking: Boeking) -> bytes:
@@ -514,3 +505,19 @@ def naar_fmutac(boeking: Boeking) -> bytes:
             v[21] = f"{b.btw_bedrag:.2f}" if b.btw_bedrag is not None else ""
         regels.append(";".join(v))
     return ("﻿" + "\n".join(regels) + "\n").encode("utf-8")
+
+
+def asperion_weergave(boeking: Boeking) -> list[dict]:
+    """Zo toont Asperion de boeking na het inlezen: omzet excl. btw, aparte btw-regels, debet/credit.
+
+    Plustekens in de CSV zijn credit (omgedraaid), mintekens debet. Handig om naast een schermafdruk te leggen.
+    """
+    uit = []
+    for b in boeking.regels:
+        if b.bedrag is None:
+            continue
+        btw = b.btw_bedrag or NUL
+        bedrag = b.bedrag - btw if b.btw_code else b.bedrag
+        uit.append({"rekening": b.rekening, "debet": -bedrag if bedrag < 0 else NUL,
+                    "credit": bedrag if bedrag > 0 else NUL, "btw_code": b.btw_code, "btw": btw if b.btw_code else NUL})
+    return uit

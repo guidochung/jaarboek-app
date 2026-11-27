@@ -32,6 +32,15 @@ class _Messages:
             return _antwoord({}, "", stop_reason="refusal")
         schema = kw["output_config"]["format"]["schema"]["properties"]
         invoer = kw["system"] + kw["messages"][0]["content"]
+        if "rapport_totalen" in schema:                # kassarapport lezen (omzet naar Asperion)
+            k = self.ouder.kassa
+            if k is not None:
+                return _antwoord(k(kw["messages"][0]["content"]) if callable(k) else k, invoer)
+            return _antwoord({"kassasysteem": "demo", "bedrijf": "Demo", "periode_van": "2026-01-01",
+                              "periode_tot": "2026-01-31", "omzet": [], "betalingen": [], "fooi": 0,
+                              "overige_inkomsten": 0, "rapport_totalen": [], "niet_geboekt": [],
+                              "opmerkingen": ["Demo-modus: Claude is nagebootst en leest dit rapport niet echt."]},
+                             invoer)
         if "antwoord" in schema:
             inv = json.loads(kw["messages"][0]["content"])
             a = self.ouder.aanpassing
@@ -130,7 +139,8 @@ def _nep_aanpassing(inv: dict) -> dict:
 
 class NepClaude:
     def __init__(self, koppel: dict | None = None, weiger: bool = False, verzin_bedrag: bool = False,
-                 uitlezing: Path | None = None, opname: Path | None = None, aanpassing=None):
+                 uitlezing: Path | None = None, opname: Path | None = None, aanpassing=None, kassa=None):
+        self.kassa = kassa           # vast antwoord (dict) of functie(tekst) -> dict voor 'kassarapport lezen'
         self.uitlezing = uitlezing   # ander 'uitgelezen jaarverslag' (JSON) dan het MISTO-verslag 2024
         self.opname = opname         # koppelingen.json van een echte Claude-run: formules afspelen
         self.verzoeken: list[dict] = []

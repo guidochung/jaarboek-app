@@ -76,6 +76,26 @@ Vereist: Python 3.10+, de pakketten uit `requirements.txt` en Google Chrome (voo
 
 Nieuwe grootboekrekeningen worden automatisch gekoppeld via een voorstel van Claude. Ze staan op **LET OP** tot ze zijn goedgekeurd.
 
+## Omzet naar Asperion (tweede onderdeel, zijbalk)
+
+Kassa-omzet van één maand → één kasboekboeking als FMUTAC-CSV voor Asperion.
+
+- **Lezen**: elk kassasysteem levert iets anders. Vaste lezers (`jaarboek/kassalezers.py`) herkennen het formaat aan de titel van het rapport:
+  - dag- en productrapport (Excel, Engels of Nederlands)
+  - Restaurant summary month + category report (PDF)
+  - Omzetlijst (PDF)
+  - Boekhouding overzicht (PDF)
+
+  Een onbekend formaat kan Claude lezen (`jaarboek/kassa_claude.py`, knop **Lees met Claude**, ca. $0,05 – $0,10). Daarna moet elk overgenomen bedrag letterlijk in het rapport staan; anders FOUT.
+- **Tussenformaat** (`Kassaomzet` in `jaarboek/omzet.py`): omzet per categorie (of per btw-tarief), betalingen per betaalwijze, fooi, overige inkomsten en het btw-overzicht van de kassa. Boeking, controles en CSV zijn voor elk kassasysteem gelijk.
+- **Koppeling per klant**: categorie (+ tarief) → grootboekrekening, betaalwijze → tegenrekening, dagboek, boekstukprefix en boekingsstijl:
+  - **uitgebreid**: elke betaalwijze apart (Bar Bellini)
+  - **compact**: tegenkant per tegenrekening, overal dezelfde omschrijving
+
+  Lokaal bewaard in `klanten/omzet/<klant>.json`; op de server download en upload je hem.
+- **Btw**: per regel bedrag incl. btw × tarief / (100 + tarief), zoals het kantoor en Asperion rekenen. Wijkt de btw van de kassa meer dan € 0,05 af, dan staat dat als LET OP in de controles.
+- **Controles** (FOUT blokkeert de download): omzet per tarief tegen het btw-overzicht van de kassa, elke regel een rekening, btw-codes, sluit op nul. Op LET OP staan het verschil (betalingen − omzet − fooi − overige) en posten die niet geboekt worden.
+
 ## Kosten (Claude Opus 5.5: $4 / $20 per miljoen input-/output-tokens)
 
 | Taak | Wanneer | Schatting |
@@ -120,7 +140,8 @@ De 36 tests dekken o.a. het doorrollen van een BV-rapport met 5-jarige meerjaren
 |---|---|
 | `app.py` | Eén venster: oud jaarverslag + nieuwe balans → nieuw jaarverslag |
 | `app_uitgebreid.py` | Uitgebreide app met klantbeheer en koppelingen |
-| `jaarboek/` | Code: `eenvoudig` (de ene stap), `inlezen`, `berekenen`, `signalen`, `ai`, `onboarding`, `pipeline`, `render`, `rapport`, `dossier` |
+| `jaarboek/` | Code: `eenvoudig` (de ene stap), `inlezen`, `berekenen`, `signalen`, `ai`, `onboarding`, `pipeline`, `render`, `rapport`, `dossier`; omzet: `omzet`, `kassalezers`, `kassa_claude` |
+| `omzet_koppeling.json` | Standaardkoppeling kassa-omzet (categorieën, tegenrekeningen, btw-codes) |
 | `templates/jaarrekening.html.j2` | Opmaak en standaardteksten van het kantoor |
 | `kantoor.json` | Kantoorgegevens, drempels voor signalen en de AI-effort |
 | `standaard_mapping.json` | Standaardkoppeling voor nieuwe klanten (Asperion-rekeningschema) |

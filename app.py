@@ -32,9 +32,12 @@ from jaarboek.ai import MODEL, AIFout, ClaudeAI  # noqa: E402
 from jaarboek.dossier import laad_kantoor  # noqa: E402
 from jaarboek.doorrol import STAPPEN, DoorrolFout, bronnen, formule_tekst, pas_aan, rol_door  # noqa: E402
 from jaarboek.inlezen import InvoerFout  # noqa: E402
-from jaarboek.omzet import (TEGENREKENING_LABELS, OmzetFout, bewaar_koppeling, euro_nl,  # noqa: E402
-                            koppeling_uit_json, laad_koppeling, lees_kassarapporten, maak_boeking, naar_fmutac,
-                            prefix_uit_naam, stel_koppeling_voor)
+from jaarboek.kassa_claude import lees_met_claude  # noqa: E402
+from jaarboek.kassalezers import lees_omzet  # noqa: E402
+from jaarboek.omzet import (STIJLEN, TEGENREKENING_LABELS, OmzetFout, OnbekendFormaat,  # noqa: E402
+                            OnvolledigeInvoer, asperion_weergave, bewaar_koppeling, euro_nl, koppeling_uit_json,
+                            laad_koppeling, maak_boeking, naar_fmutac, prefix_uit_naam, standaard_boekstuk,
+                            stel_betalingen_voor, stel_koppeling_voor)
 from jaarboek.render import RenderFout, pdf_pagina  # noqa: E402
 from jaarboek.structuur import MAANDEN, fmt  # noqa: E402
 
@@ -203,7 +206,7 @@ def toon_gebruik(ai) -> None:
 
 
 # --------------------------------------------------------------------------
-# Omzet naar Asperion: kassarapporten -> kasboekboeking (FMUTAC-CSV), zonder Claude
+# Omzet naar Asperion: kassarapporten -> kasboekboeking (FMUTAC-CSV); vaste lezers, Claude als vangnet
 # --------------------------------------------------------------------------
 JAARVERSLAG, OMZET = "Jaarverslag", "Omzet naar Asperion"
 ONDERTITEL = {JAARVERSLAG: "Jaarverslag uit de Asperion-balans", OMZET: "Kassa-omzet naar Asperion"}
@@ -217,7 +220,15 @@ def _slug(naam: str) -> str:
 
 @st.cache_data(show_spinner=False, max_entries=20)
 def _lees_kassa(bestanden: tuple[tuple[str, bytes], ...]):
-    return lees_kassarapporten(list(bestanden))
+    """Vaste lezers. -> (Kassaomzet of None, soort probleem, melding); ook problemen worden zo gecachet."""
+    try:
+        return lees_omzet(list(bestanden)), "", ""
+    except OnvolledigeInvoer as e:
+        return None, "onvolledig", str(e)
+    except OnbekendFormaat as e:
+        return None, "onbekend", str(e)
+    except OmzetFout as e:
+        return None, "fout", str(e)
 
 
 def _koppeling_voor(bedrijf: str) -> tuple[dict, str]:
@@ -235,16 +246,40 @@ def _koppeling_voor(bedrijf: str) -> tuple[dict, str]:
     return laad_koppeling(), "standaard"
 
 
-def pagina_omzet() -> None:
+def _lees_met_claude(invoer, sig: str, soort: str, melding: str, ai) -> bool:
+    """Onbekend formaat (of de vaste lezer faalt): Claude laten lezen, alleen na een klik. True = gelezen."""
+    st.warning((melding if soort == "onbekend" else f"De vaste lezer loopt vast: {melding}")
+               + " Claude kan het rapport lezen; daarna controleert de app elk bedrag tegen het rapport.",
+               icon=":material/help:")
+    if ai is None:
+        st.caption("Vul in de zijbalk een Claude API-sleutel in om het rapport door Claude te laten lezen "
+                   "(ongeveer \\$0,05 tot \\$0,10 per maand).")
+        return False
+    if not st.button("Lees met Claude", type="primary", icon=":material/auto_awesome:", key=f"oz_claude_{sig}"):
+        st.caption("Eén verzoek aan Claude, ongeveer \\$0,05 tot \\$0,10.")
+        return False
+    with st.spinner("Claude leest het kassarapport …"):
+        try:
+            kassa = lees_met_claude(list(invoer), ai)
+        except (OmzetFout, AIFout) as e:
+            st.error(str(e), icon=":material/error:")
+            return False
+    st.session_state.setdefault("oz_claude", {})[sig] = kassa
+    st.rerun()                                       # opnieuw opbouwen zonder de melding en de knop
+    return True
+
+
+def pagina_omzet(ai) -> None:
     st.html('<p class="jb-kop">Omzet naar Asperion</p>'
-            '<p class="jb-intro">Upload het dagrapport en het productrapport uit de kassa. Per kassacategorie komt er '
-            'één omzetregel met btw op de juiste grootboekrekening. De boeking download je als FMUTAC-CSV voor het '
-            'kasboek in Asperion. Hiervoor is geen Claude-sleutel nodig.</p>')
+            '<p class="jb-intro">Upload de omzetrapporten van één maand uit de kassa (Excel of PDF). Per kassacategorie '
+            'en btw-tarief komt er één omzetregel op de juiste grootboekrekening; de tegenkant komt uit de betaalwijzen. '
+            'De boeking download je als FMUTAC-CSV voor het kasboek in Asperion. Bekende kassa\'s worden direct '
+            'gelezen; een onbekend formaat kan Claude lezen (API-sleutel nodig).</p>')
     k1, k2 = st.columns([3, 2], gap="medium")
     with k1:
         st.html('<div class="jb-stap"><span class="jb-nr">1</span>Kassarapporten '
-                '<small>dagrapport en productrapport, Excel</small></div>')
-        bestanden = st.file_uploader("Kassarapporten", type=["xlsx"], accept_multiple_files=True,
+                '<small>Excel of PDF, alles van één maand</small></div>')
+        bestanden = st.file_uploader("Kassarapporten", type=["xlsx", "pdf", "csv", "txt"], accept_multiple_files=True,
                                      key="oz_rapporten", label_visibility="collapsed")
     with k2:
         st.html('<div class="jb-stap"><span class="jb-nr">2</span>Koppeling <small>optioneel, eerder gedownload</small></div>')
@@ -263,23 +298,54 @@ def pagina_omzet() -> None:
             st.error(str(e), icon=":material/error:")
         st.session_state.oz_versie = st.session_state.get("oz_versie", 0) + 1
 
-    if len(bestanden or []) < 2:
-        st.caption("Nog nodig: " + ("het dagrapport en het productrapport." if not bestanden
-                                    else "het tweede rapport (dag- of productrapport)."))
+    if not bestanden:
+        st.caption("Nog nodig: de omzetrapporten uit de kassa (Excel of PDF).")
         return
-    try:
-        dag, prod = _lees_kassa(tuple((f.name, f.getvalue()) for f in bestanden))
-    except OmzetFout as e:
-        st.error(str(e), icon=":material/error:")
+    invoer = tuple((f.name, f.getvalue()) for f in bestanden)
+    sig = hashlib.sha1(b"".join(n.encode() + b"\0" + d for n, d in invoer)).hexdigest()[:10]
+    kassa, probleem, melding = _lees_kassa(invoer)
+    if probleem == "onvolledig":
+        st.caption(f"Nog nodig: {melding}")
         return
+    if kassa is None:
+        kassa = st.session_state.get("oz_claude", {}).get(sig)
+    if kassa is None:
+        if not _lees_met_claude(invoer, sig, probleem, melding, ai):
+            return
+        kassa = st.session_state["oz_claude"][sig]
 
-    koppeling, bron = _koppeling_voor(dag.bedrijf)
-    voorstel = stel_koppeling_voor(prod, koppeling)
-    sleutel = f"{_slug(dag.bedrijf)}_{st.session_state.get('oz_versie', 0)}"
-    sig = hashlib.sha1(b"".join(f.getvalue() for f in bestanden)).hexdigest()[:10]
-
+    koppeling, bron = _koppeling_voor(kassa.bedrijf)
+    sleutel = f"{_slug(kassa.bedrijf)}_{st.session_state.get('oz_versie', 0)}"
     st.divider()
-    kop, koppel_plek, controle_plek, regels_plek = st.container(), st.container(), st.container(), st.container()
+    # Plekken in volgorde op de pagina; gevuld in de volgorde waarin ze van elkaar afhangen
+    kop, koppel_plek, betaal_plek, controle_plek, regels_plek, instel_plek = (st.container() for _ in range(6))
+
+    # Instellingen (onderaan de pagina, maar eerst gelezen: de tegenrekeningen bepalen de betaaltabel)
+    with instel_plek, st.expander("Boekstuk, stijl en tegenrekeningen", icon=":material/tune:"):
+        c1, c2, c3 = st.columns(3)
+        boekstuk = c1.text_input("Boekstuk deze maand", key=f"oz_boekstuk_{sig}",
+                                 placeholder=f"automatisch: {standaard_boekstuk(kassa, koppeling)}",
+                                 help="Leeg laten = prefix + maand + jaar. Of vul het volgnummer uit Asperion in.")
+        prefix = c2.text_input("Boekstukprefix", value=str(koppeling.get("boekstuk_prefix") or ""),
+                               placeholder=f"automatisch: {prefix_uit_naam(kassa.bedrijf)}", key=f"oz_prefix_{sleutel}",
+                               help="Wordt bewaard in de koppeling; boekstuk = prefix + maand + jaar, bijv. BELL1026.")
+        dagboek = c3.text_input("Dagboek", value=str(koppeling.get("dagboek") or "10"), key=f"oz_dagboek_{sleutel}")
+        s1, s2 = st.columns([3, 2])
+        stijlen = list(STIJLEN)
+        stijl = s1.radio("Boekingsregels", stijlen, format_func=STIJLEN.get, key=f"oz_stijl_{sleutel}",
+                         index=stijlen.index(koppeling.get("stijl") or "uitgebreid"))
+        oms = s2.text_input("Omschrijving (compact)", value=str(koppeling.get("omschrijving") or "Omzet {periode}"),
+                            key=f"oz_oms_{sleutel}", disabled=stijl != "compact",
+                            help="Op elke regel in de compacte stijl. {periode} = 2026-01, ook {maand}, {jaar}, {bedrijf}.")
+        st.caption("Standaard-tegenrekeningen (per soort betaalwijze, plus fooi, overige inkomsten en verschil)")
+        kol, teg = st.columns(5), {}
+        for i, (s, label) in enumerate(TEGENREKENING_LABELS.items()):
+            teg[s] = kol[i % 5].text_input(label, value=str(koppeling["tegenrekeningen"].get(s, "")),
+                                           key=f"oz_teg_{s}_{sleutel}").strip()
+    koppeling = {**koppeling, "boekstuk_prefix": prefix.strip(), "dagboek": dagboek.strip() or "10", "stijl": stijl,
+                 "omschrijving": oms.strip() or "Omzet {periode}", "tegenrekeningen": teg}
+    voorstel = stel_koppeling_voor(kassa, koppeling)
+    betaal = stel_betalingen_voor(kassa, koppeling)
 
     # Koppeltabel: omschrijving en grootboekrekening per kassacategorie en btw-tarief
     nieuw = [r for r in voorstel if not r.bekend or not r.rekening]
@@ -296,7 +362,8 @@ def pagina_omzet() -> None:
             df, key=f"oz_editor_{sig}_{sleutel}", hide_index=True, width="stretch", num_rows="fixed",
             disabled=["Kassacategorie", "Btw", "Incl. btw", "Btw-bedrag", "Status"],
             column_config={
-                "Omschrijving": st.column_config.TextColumn(width="medium", help="Komt na 'Omzet <periode>' in de boeking"),
+                "Omschrijving": st.column_config.TextColumn(width="medium", help="Komt na 'Omzet <periode>' in de "
+                                                                               "uitgebreide stijl"),
                 "Grootboek": st.column_config.TextColumn(validate=r"^\d+$", help="Rekeningnummer in Asperion"),
                 "Incl. btw": st.column_config.TextColumn(alignment="right"),
                 "Btw-bedrag": st.column_config.TextColumn(alignment="right")})
@@ -304,39 +371,43 @@ def pagina_omzet() -> None:
         r.omschrijving = str(rij["Omschrijving"] or "").strip() or r.categorie
         r.rekening = str(rij["Grootboek"] or "").strip()
 
-    # Boekstuk en tegenrekeningen (onderaan de pagina)
-    with st.expander("Boekstuk en tegenrekeningen", icon=":material/tune:"):
-        c1, c2 = st.columns(2)
-        prefix = c1.text_input("Boekstukprefix", value=str(koppeling.get("boekstuk_prefix") or ""),
-                               placeholder=f"automatisch: {prefix_uit_naam(dag.bedrijf)}", key=f"oz_prefix_{sleutel}",
-                               help="Boekstuknummer = prefix + maand + jaar, bijvoorbeeld BELL1026.")
-        dagboek = c2.text_input("Dagboek", value=str(koppeling.get("dagboek") or "10"), key=f"oz_dagboek_{sleutel}")
-        st.caption("Tegenrekeningen")
-        kol, teg = st.columns(4), {}
-        for i, (s, label) in enumerate(TEGENREKENING_LABELS.items()):
-            teg[s] = kol[i % 4].text_input(label, value=str(koppeling["tegenrekeningen"].get(s, "")),
-                                           key=f"oz_teg_{s}_{sleutel}").strip()
-    koppeling = {**koppeling, "boekstuk_prefix": prefix.strip(), "dagboek": dagboek.strip() or "10",
-                 "tegenrekeningen": teg}
-    b = maak_boeking(dag, prod, voorstel, koppeling)
-    nieuwe_koppeling = json.dumps(bewaar_koppeling(koppeling, voorstel), indent=2, ensure_ascii=False)
+    # Koppeltabel: tegenrekening per betaalwijze
+    herkomst = {"koppeling": "Koppeling", "standaard": "Standaard", "nieuw": "Nieuw"}
+    open_b = any(b.herkomst == "nieuw" for b in betaal)
+    with betaal_plek, st.expander(f"Koppeling betaalwijzen · {len(betaal)}", expanded=open_b, icon=":material/payments:"):
+        st.caption("Tegenrekening per betaalwijze uit het rapport. 'Standaard' komt uit de standaard-tegenrekening "
+                   "voor die soort (instellingen onderaan); een andere rekening wordt per betaalwijze bewaard.")
+        df = pd.DataFrame([{"Betaalwijze": b.naam, "Soort": TEGENREKENING_LABELS.get(b.soort, "onbekend"),
+                            "Bedrag": euro_nl(b.bedrag), "Tegenrekening": b.rekening, "Herkomst": herkomst[b.herkomst]}
+                           for b in betaal], columns=["Betaalwijze", "Soort", "Bedrag", "Tegenrekening", "Herkomst"])
+        bewerkt = st.data_editor(
+            df, key=f"oz_betaal_{sig}_{sleutel}", hide_index=True, width="stretch", num_rows="fixed",
+            disabled=["Betaalwijze", "Soort", "Bedrag", "Herkomst"],
+            column_config={"Tegenrekening": st.column_config.TextColumn(validate=r"^\d+$", help="Rekeningnummer in Asperion"),
+                           "Bedrag": st.column_config.TextColumn(alignment="right")})
+    for b, (_, rij) in zip(betaal, bewerkt.iterrows()):
+        b.rekening = str(rij["Tegenrekening"] or "").strip()
+
+    b = maak_boeking(kassa, voorstel, koppeling, betaal, boekstuk)
+    nieuwe_koppeling = json.dumps(bewaar_koppeling(koppeling, voorstel, betaal), indent=2, ensure_ascii=False)
 
     with kop:
+        door = "gelezen door Claude" if kassa.door_claude else "vaste lezer"
         st.html(f'<div class="jb-hero"><div><div class="jb-hero-titel">Omzet {MAANDEN[b.eind.month - 1]} '
                 f'{b.eind.year} · {html.escape(b.bedrijf)}</div><div class="jb-hero-sub">Boekstuk {html.escape(b.boekstuk)}'
                 f' · dagboek {html.escape(b.dagboek)} · {len(b.regels) - 1} boekingsregels · boekingsdatum '
-                f'{b.eind:%d-%m-%Y}</div></div></div>')
+                f'{b.eind:%d-%m-%Y}<br>{html.escape(kassa.lezer)} ({door})</div></div></div>')
         d1, d2, d3 = st.columns([1.2, 1.2, 1])
         d1.download_button("Download boeking (CSV)", b"" if b.fout else naar_fmutac(b), b.bestandsnaam, "text/csv",
                            type="primary", width="stretch", icon=":material/download:", disabled=b.fout)
         d2.download_button("Download koppeling", nieuwe_koppeling.encode("utf-8"),
                            f"omzet_koppeling_{_slug(b.bedrijf)}.json", "application/json", width="stretch",
                            icon=":material/file_download:",
-                           help="Koppeltabel en instellingen; upload hem volgende maand bij stap 2.")
+                           help="Koppeltabellen en instellingen; upload hem volgende maand bij stap 2.")
         if CONTAINER:
             d3.caption("Op de server wordt niets bewaard: download de koppeling en upload hem volgende maand weer.")
         elif d3.button("Bewaar koppeling", width="stretch", icon=":material/save:",
-                       help=f"Bewaart koppeltabel en instellingen voor {b.bedrijf}; volgende maand worden ze "
+                       help=f"Bewaart koppeltabellen en instellingen voor {b.bedrijf}; volgende maand worden ze "
                             "automatisch gebruikt."):
             OMZET_KLANTEN.mkdir(parents=True, exist_ok=True)
             (OMZET_KLANTEN / f"{_slug(b.bedrijf)}.json").write_text(nieuwe_koppeling + "\n", encoding="utf-8")
@@ -351,6 +422,8 @@ def pagina_omzet() -> None:
         m[2].metric("Betalingen", euro_nl(b.betalingen))
         m[3].metric("Verschil", euro_nl(b.verschil), help="Sluitpost: betalingen min omzet incl. btw, fooi en "
                                                             "overige inkomsten.")
+        if kassa.opmerkingen:
+            st.info("\n".join(f"- {html.escape(o)}" for o in kassa.opmerkingen), icon=":material/info:")
         st.write("")
 
     let_op = sum(c["status"] == "LET OP" for c in b.controles)
@@ -361,13 +434,23 @@ def pagina_omzet() -> None:
 
     with regels_plek, st.expander(f"Boekingsregels · {len(b.regels) - 1}", expanded=True,
                                   icon=":material/receipt_long:"):
-        st.dataframe(pd.DataFrame([{"Nr": i, "Omschrijving": r.omschrijving, "Rekening": r.rekening,
-                                    "Bedrag": euro_nl(r.bedrag), "Btw-code": r.btw_code, "Btw": euro_nl(r.btw_bedrag)}
-                                   for i, r in enumerate(b.regels)]),
-                     hide_index=True, width="stretch",
-                     column_config={"Omschrijving": st.column_config.TextColumn(width="large"),
-                                    "Bedrag": st.column_config.TextColumn(alignment="right"),
-                                    "Btw": st.column_config.TextColumn(alignment="right")})
+        if st.toggle("Toon zoals in Asperion", key="oz_asperion",
+                     help="Omzet excl. btw in debet/credit, zoals Asperion de boeking na het inlezen toont. Asperion "
+                          "zet de btw zelf op de btw-rekeningen en vult het kasboek aan met € 0,00."):
+            st.dataframe(pd.DataFrame([{"Rekening": r["rekening"], "Debet": euro_nl(r["debet"]) if r["debet"] else "",
+                                        "Credit": euro_nl(r["credit"]) if r["credit"] else "", "Btw-code": r["btw_code"],
+                                        "Btw": euro_nl(r["btw"]) if r["btw_code"] else ""}
+                                       for r in asperion_weergave(b)]),
+                         hide_index=True, width="stretch",
+                         column_config={k: st.column_config.TextColumn(alignment="right") for k in ("Debet", "Credit", "Btw")})
+        else:
+            st.dataframe(pd.DataFrame([{"Nr": i, "Omschrijving": r.omschrijving, "Rekening": r.rekening,
+                                        "Bedrag": euro_nl(r.bedrag), "Btw-code": r.btw_code, "Btw": euro_nl(r.btw_bedrag)}
+                                       for i, r in enumerate(b.regels)]),
+                         hide_index=True, width="stretch",
+                         column_config={"Omschrijving": st.column_config.TextColumn(width="large"),
+                                        "Bedrag": st.column_config.TextColumn(alignment="right"),
+                                        "Btw": st.column_config.TextColumn(alignment="right")})
 
 
 # --------------------------------------------------------------------------
@@ -427,7 +510,7 @@ with st.sidebar:
     st.html(f'<div class="jb-kantoor"><img alt="PFC" src="{kantoor_logo()}"></div>')
 
 if onderdeel == OMZET:
-    pagina_omzet()
+    pagina_omzet(ai)
     toon_gebruik(ai)
     st.stop()
 
