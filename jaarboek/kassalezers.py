@@ -4,7 +4,9 @@ Elk formaat wordt herkend aan de titel van het rapport, niet aan de bestandsnaam
 - Dag- en productrapport (Excel, Engels of Nederlands), bijv. Bar Bellini;
 - 'RESTAURANT SUMMARY MONTH REPORT' + 'CATEGORY SUMMARY REPORT' (PDF), bijv. Black Pepper;
 - 'Omzetlijst' (PDF), bijv. Kazoku;
-- 'Boekhouding overzicht' (PDF), bijv. Ninja Sushi.
+- 'Boekhouding overzicht' (PDF), bijv. Ninja Sushi;
+- booq 'Rapportage diensten op omzetcategorie' (PDF), bijv. Cafe Bica. Geeft geen btw-tarief per categorie:
+  dat komt uit de koppeling (vast tarief per categorie, plus één restpost die past op het btw-overzicht).
 
 Een lezer neemt bedragen letterlijk over en controleert zijn eigen werk (subtotalen, kolomtotalen). Lukt dat
 niet, dan volgt een OmzetFout; een onbekend formaat geeft OnbekendFormaat (dan kan Claude het proberen).
@@ -555,10 +557,94 @@ def lees_boekhouding_overzicht(naam: str, tekst: str) -> Kassaomzet:
 
 
 # ==========================================================================
+# PDF: booq 'Rapportage diensten op omzetcategorie' (Cafe Bica)
+# ==========================================================================
+def lees_booq(naam: str, tekst: str, regels: list[list[Woord]]) -> Kassaomzet:
+    """Omzet per subcategorie (ingesprongen; hoofdgroepen staan links en tellen niet mee), zonder btw-tarief.
+
+    Het tarief per categorie komt uit de koppeling; het btw-overzicht (basisbedrag + btw) is de controle.
+    """
+    kop = re.search(r"Rapportage diensten op omzetcategorie\s*(.*)", tekst)
+    bedrijf = kop[1].strip() if kop else ""
+    van = re.search(r"Datum van:\s*(\d{2})-(\d{2})-(\d{4})", tekst)
+    tot = re.search(r"Datum t/m:\s*(\d{2})-(\d{2})-(\d{4})", tekst)
+    if not van or not tot:
+        raise OmzetFout(f"{naam}: periode ('Datum van' / 'Datum t/m') niet gevonden.")
+    start, eind = date(int(van[3]), int(van[2]), int(van[1])), date(int(tot[3]), int(tot[2]), int(tot[1]))
+
+    # Categorieën: naam op een ingesprongen regel, IdNr/aantal/bedrag op de regel eronder
+    i = next((i for i, r in enumerate(regels) if _regel_tekst(r).startswith("Totalen verkopen")), None)
+    if i is None:
+        raise OmzetFout(f"{naam}: 'Totalen verkopen' niet gevonden.")
+    links = regels[i][0].x
+    omzet, totaal, naam_cat = [], None, None
+    for r in regels[i + 1:]:
+        tekst_r = _regel_tekst(r)
+        bedrag = next((w.tekst for w in r if re.fullmatch(r"-?\d+,\d{2}", w.tekst)), None)
+        if r[0].x <= links + 5:                              # hoofdgroep of totaal
+            naam_cat = None
+            if tekst_r.startswith("Totaal"):
+                totaal = _nl(bedrag) if bedrag else None
+                break
+        elif bedrag is None:
+            naam_cat = tekst_r                               # naam van een subcategorie
+        elif naam_cat is not None:
+            if _nl(bedrag):
+                omzet.append(Omzetpost(naam_cat, None, _nl(bedrag)))
+            naam_cat = None
+    if totaal is None or sum(o.bruto for o in omzet) != totaal:
+        raise OmzetFout(f"{naam}: de omzetcategorieën tellen niet op tot het totaal van het rapport.")
+
+    totalen = {}
+    for m in re.finditer(r"BTW\s+(\d+)(?:[.,]\d+)?\s*%\s+(-?\d+,\d{2})\s+(-?\d+,\d{2})", tekst):
+        basis, btw = _nl(m[2]), _nl(m[3])
+        totalen[int(m[1])] = (basis + btw, btw)
+    if not totalen:
+        raise OmzetFout(f"{naam}: btw-overzicht niet gevonden.")
+    controles, noten = [], []
+    som = sum(i for i, _ in totalen.values())
+    controle(controles, "OK" if som == totaal else "FOUT", "Btw-overzicht telt op",
+             f"basisbedrag + btw per tarief samen {euro_nl(som)}, omzet volgens het rapport {euro_nl(totaal)}")
+
+    # Betalingen ('naam bedrag', laagste niveau; 'Totaal' tussendoor is een paginatotaal) en overige posten
+    sectie, betalingen, eindtotaal, niet = "", [], None, []
+    for r in (x.strip() for x in tekst.splitlines()):
+        if r.startswith("Totaal betalingen"):
+            sectie = "betalingen"
+        elif r.startswith("Totalen fooi"):
+            sectie = "fooi"
+        elif r.startswith("Verplichtingen"):
+            sectie = "verplichtingen"
+        elif r.startswith("Totalen statiegeld"):
+            sectie = "statiegeld"
+        elif r.startswith("Totalen kassa transacties"):
+            sectie = "kastransacties"
+        elif r.startswith("Totalen"):
+            sectie = ""
+        elif sectie == "betalingen" and (m := re.fullmatch(r"(.+?)\s+(-?\d+\.\d{2})", r)):
+            if m[1] == "Totaal":
+                eindtotaal = Decimal(m[2])
+            elif Decimal(m[2]):
+                betalingen.append(Betaalpost(m[1], Decimal(m[2]), soort_betaling(m[1])))
+        elif sectie and sectie != "betalingen" and (m := re.fullmatch(r"(.+?)\s+(?:\d+\s+)?(-?\d+,\d{2})", r)):
+            if m[1] == "Totaal" and sectie in ("fooi", "statiegeld", "kastransacties") and _nl(m[2]):
+                niet.append(({"fooi": "Fooi", "statiegeld": "Statiegeld", "kastransacties": "Kastransacties"}[sectie],
+                             _nl(m[2])))
+            elif m[1] != "Totaal" and sectie == "verplichtingen" and _nl(m[2]):
+                niet.append((m[1], _nl(m[2])))
+    if eindtotaal is None or sum(b.bedrag for b in betalingen) != eindtotaal:
+        raise OmzetFout(f"{naam}: de betaalwijzen tellen niet op tot het totaal van de betalingen.")
+    noten.append("Booq geeft geen btw-tarief per categorie: het tarief komt uit de koppeling; één restpost vangt "
+                 "het verschil met het btw-overzicht op.")
+    return Kassaomzet(bedrijf, start, eind, "booq · Rapportage diensten op omzetcategorie (PDF)", omzet, betalingen,
+                      NUL, NUL, totalen, "btw-overzicht", niet, controles, noten, [naam], (eind - start).days + 1)
+
+
+# ==========================================================================
 # Herkennen en samenvoegen
 # ==========================================================================
 def _herken(naam: str, data: bytes):
-    """-> (soort, inhoud). Soort: dag, product, summary_maand, summary_categorie, omzetlijst, boekhouding."""
+    """-> (soort, inhoud). Soort: dag, product, summary_maand, summary_categorie, omzetlijst, boekhouding, booq."""
     if data[:2] == b"PK":
         r = lees_kassarapport(data, naam)                # OnbekendFormaat als A1 geen bekende titel is
         return ("dag" if isinstance(r, Dagrapport) else "product"), r
@@ -573,6 +659,8 @@ def _herken(naam: str, data: bytes):
             return "omzetlijst", lees_omzetlijst(naam, tekst, regels)
         if "Boekhouding overzicht" in kop and "Bestelperiode" in kop:
             return "boekhouding", lees_boekhouding_overzicht(naam, tekst)
+        if "Rapportage diensten op omzetcategorie" in kop:
+            return "booq", lees_booq(naam, tekst, regels)
         raise OnbekendFormaat(f"{naam}: dit kassarapport (PDF) ken ik nog niet.")
     raise OnbekendFormaat(f"{naam}: dit bestandsformaat ken ik nog niet (geen Excel of PDF).")
 
@@ -604,5 +692,7 @@ def lees_omzet(bestanden) -> Kassaomzet:
         return gelezen["omzetlijst"][0][1]
     if soorten == {"boekhouding"}:
         return gelezen["boekhouding"][0][1]
+    if soorten == {"booq"}:
+        return gelezen["booq"][0][1]
     raise OmzetFout("De bestanden komen uit verschillende kassasystemen: " +
                     ", ".join(n for lijst in gelezen.values() for n, _ in lijst) + ".")

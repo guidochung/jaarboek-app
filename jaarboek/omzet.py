@@ -38,7 +38,12 @@ NUL = Decimal("0")
 MARGE = Decimal("0.05")           # afrondingsruimte tussen omzetregels en het btw-overzicht van de kassa
 AANTAL_KOLOMMEN = 40              # FMUTAC-regel: 40 velden, gescheiden door ';'
 STIJLEN = {"uitgebreid": "Uitgebreid: elke betaalwijze apart, omschrijving per regel",
+           "samengevat": "Samengevat: omschrijving per omzetregel, tegenkant per tegenrekening",
            "compact": "Compact: tegenkant per tegenrekening, overal dezelfde omschrijving"}
+BEDRAGEN = {"incl": "Omzetregels incl. btw", "excl": "Omzetregels excl. btw (btw-bedrag apart)"}
+# Naam van een samengevoegde tegenregel ('Pinbetalingen 2026-10'), naar de soort van de eerste betaling erop
+SOORT_LABEL = {"pin": "Pinbetalingen", "contant": "Contant", "online": "Online betalingen", "op_rekening": "Op rekening",
+               "reserveringen": "Reserveringen", "cadeaubonnen": "Cadeaubonnen", "": "Betalingen"}
 
 # Standaardsoorten betalingen (tegenrekening uit 'tegenrekeningen' in de koppeling) en overige tegenposten
 TEGENREKENING_LABELS = {
@@ -67,7 +72,7 @@ class OnvolledigeInvoer(OmzetFout):
 @dataclass
 class Omzetpost:
     groep: str                      # kassacategorie, of 'Omzet 9%' als het rapport alleen tarieven geeft
-    tarief: int
+    tarief: int | None              # None: het rapport geeft geen tarief (komt dan uit de koppeling)
     bruto: Decimal                  # incl. btw
     btw: Decimal | None = None      # btw volgens het rapport (alleen ter informatie)
     afgeleid: bool = False          # uitgerekend, staat niet letterlijk in het rapport
@@ -128,7 +133,7 @@ def soort_betaling(naam: str) -> str:
         return "cadeaubonnen"
     if re.search(r"reserver", n):
         return "reserveringen"
-    if re.search(r"\bpin\b|card|kaart|maestro|master|visa|amex|american express|v ?pay|debit|bancontact|"
+    if re.search(r"\bpin\b|card|kaart|maestro|master|visa|amex|american express|v[ -]?pay|debit|bancontact|"
                  r"apple pay|google pay|payconiq|\bpsp\b", n):              # betaalwijze gaat voor kanaal
         return "pin"
     if re.search(r"online|ideal|web|thuisbezorgd|uber|deliveroo|e-?commerce|just eat", n):
@@ -174,19 +179,23 @@ def koppeling_uit_json(tekst: str | bytes) -> dict:
         c.setdefault("omschrijving", c["categorie"])
         c.setdefault("rekening", "")
         c["tarief"], c["rekening"] = str(c["tarief"] or ""), str(c["rekening"] or "")
+        c["btw_tarief"] = str(c.get("btw_tarief") or "")              # vast tarief als de kassa er geen geeft
+        c["restpost"] = bool(c.get("restpost"))                         # vangt het verschil met het btw-overzicht
     for b in basis.setdefault("betaalwijzen", []):
         if not isinstance(b, dict) or not b.get("betaalwijze"):
             raise OmzetFout("Elke betaalwijze in de koppeling heeft minimaal een 'betaalwijze' nodig.")
         b["rekening"] = str(b.get("rekening") or "")
     if basis.get("stijl", "uitgebreid") not in STIJLEN:
         raise OmzetFout(f"Onbekende boekingsstijl '{basis['stijl']}' (kies uit: {', '.join(STIJLEN)}).")
+    if basis.get("bedragen", "incl") not in BEDRAGEN:
+        raise OmzetFout(f"Onbekende waarde voor 'bedragen': '{basis['bedragen']}' (kies uit: incl, excl).")
     return basis
 
 
 @dataclass
 class Koppelregel:
     categorie: str
-    tarief: int
+    tarief: int | None              # None: nog geen tarief gekozen (kassa zonder tarief per categorie)
     omschrijving: str
     rekening: str
     bruto: Decimal                  # incl. btw, op centen
@@ -194,6 +203,8 @@ class Koppelregel:
     netto: Decimal
     bekend: bool                    # stond al in de koppeltabel
     gesplitst: bool                 # categorie heeft omzet in meer dan één tarief
+    vast: bool = False              # tarief komt uit de koppeling (de kassa geeft er geen)
+    rest: bool = False              # restpost: vangt het verschil met het btw-overzicht op
 
 
 @dataclass
@@ -206,16 +217,16 @@ class Betaalregel:
     herkomst: str                   # 'koppeling', 'standaard' of 'nieuw'
 
 
-def _tarief_volgorde(t: int):
-    return (t == 0, t)              # 9, 21, ..., 0 achteraan
+def _tarief_volgorde(t: int | None):
+    return (t is None, t == 0, t or 0)          # 9, 21, ..., 0 achteraan
 
 
 def stel_koppeling_voor(kassa: Kassaomzet, koppeling: dict) -> list[Koppelregel]:
     """Eén regel per kassacategorie en btw-tarief, met omschrijving en rekening uit de koppeling."""
     tabel = {(_norm(k["categorie"]), str(k.get("tarief") or "")): k for k in koppeling.get("categorieen", [])}
-    posten: dict[tuple[str, int], list] = {}                 # (groep, tarief) -> [naam, bruto]; volgorde blijft
+    posten: dict[tuple[str, int | None], list] = {}          # (groep, tarief) -> [naam, bruto]; volgorde blijft
     for o in kassa.omzet:
-        sleutel = (_norm(o.groep), int(o.tarief))
+        sleutel = (_norm(o.groep), None if o.tarief is None else int(o.tarief))
         posten.setdefault(sleutel, [o.groep, NUL])[1] += Decimal(o.bruto)
     tarieven = defaultdict(set)
     for (groep, t), (_, bruto) in posten.items():
@@ -225,6 +236,16 @@ def stel_koppeling_voor(kassa: Kassaomzet, koppeling: dict) -> list[Koppelregel]
     for (groep, t), (naam, bruto) in posten.items():
         bruto = euro_centen(bruto)
         if not bruto:
+            continue
+        if t is None:                                        # tarief en restpost uit de koppeling
+            k = tabel.get((groep, ""))
+            rest = bool(k and k.get("restpost"))
+            vast_t = str(k.get("btw_tarief") or "").strip() if k else ""
+            tv = int(vast_t) if vast_t.isdigit() and not rest else None
+            btw = btw_uit_bruto(bruto, tv) if tv is not None else NUL
+            uit.append(Koppelregel(naam, tv, (k.get("omschrijving") if k else "") or naam,
+                                   str(k.get("rekening") or "").strip() if k else "", bruto, btw, bruto - btw,
+                                   k is not None, False, vast=True, rest=rest))
             continue
         gesplitst = len(tarieven[groep]) > 1
         achter = f" {t}%" if gesplitst else ""
@@ -237,6 +258,45 @@ def stel_koppeling_voor(kassa: Kassaomzet, koppeling: dict) -> list[Koppelregel]
         btw = btw_uit_bruto(bruto, t)
         uit.append(Koppelregel(naam, t, oms, str(rek or "").strip(), bruto, btw, bruto - btw, bekend, gesplitst))
     return uit
+
+
+def verdeel_rest(regels: list[Koppelregel], kassa: Kassaomzet) -> tuple[list[Koppelregel], list[dict]]:
+    """Restpost verdelen over de tarieven: per tarief btw-overzicht min de categorieën met een vast tarief.
+
+    Zo zijn omzet én btw per tarief gelijk aan het btw-overzicht van de kassa (zoals het kantoor boekt).
+    -> (regels met de restpost per tarief, controles).
+    """
+    rest = [r for r in regels if r.rest]
+    controles: list[dict] = []
+    if not rest:
+        return regels, controles
+    if len(rest) > 1:
+        controle(controles, "FOUT", "Restpost", "meer dan één restpost: " + ", ".join(r.categorie for r in rest))
+        return regels, controles
+    r0 = rest[0]
+    if not kassa.totalen:
+        controle(controles, "FOUT", "Restpost", "het rapport heeft geen btw-overzicht om de restpost op te verdelen")
+        return regels, controles
+    vaste = [r for r in regels if not r.rest]
+    posten = []
+    for t in sorted(kassa.totalen, key=_tarief_volgorde):
+        incl, btw = (euro_centen(x) for x in kassa.totalen[t])
+        ri = incl - sum((r.bruto for r in vaste if r.tarief == t), NUL)
+        rb = btw - sum((r.btw for r in vaste if r.tarief == t), NUL)
+        if ri or rb:
+            posten.append((t, ri, rb))
+    som = sum((ri for _, ri, _ in posten), NUL)
+    negatief = [f"{t}% {euro_nl(ri)}" for t, ri, _ in posten if ri < 0]
+    ok = abs(som - r0.bruto) <= MARGE and not negatief
+    controle(controles, "OK" if ok else "FOUT", f"Restpost {r0.categorie}",
+             f"{euro_nl(r0.bruto)} in het rapport, verdeeld: " + ", ".join(f"{t}% {euro_nl(ri)}" for t, ri, _ in posten)
+             + ("" if ok else f" (samen {euro_nl(som)}" + (f"; negatief: {', '.join(negatief)}" if negatief else "")
+                + "; controleer de vaste tarieven van de andere categorieën)"))
+    gesplitst = len(posten) > 1
+    nieuw = [Koppelregel(r0.categorie, t, r0.omschrijving + (f" {t}%" if gesplitst else ""), r0.rekening, ri, rb,
+                         ri - rb, r0.bekend, gesplitst, vast=True, rest=True) for t, ri, rb in posten]
+    i = regels.index(r0)
+    return regels[:i] + nieuw + regels[i + 1:], controles
 
 
 def _tegenrekeningen(koppeling: dict) -> dict:
@@ -265,6 +325,16 @@ def bewaar_koppeling(koppeling: dict, regels: list[Koppelregel], betaalregels: l
     nieuw = copy.deepcopy(koppeling)
     lijst = nieuw.setdefault("categorieen", [])
     for r in regels:
+        if r.vast:                                           # tarief uit de koppeling: één regel per categorie
+            c = next((c for c in lijst if _norm(c["categorie"]) == _norm(r.categorie)
+                      and not str(c.get("tarief") or "")), None)
+            waarden = {"omschrijving": r.omschrijving, "rekening": r.rekening.strip(),
+                       "btw_tarief": "" if r.rest or r.tarief is None else str(r.tarief), "restpost": r.rest}
+            if c is not None:
+                c.update(waarden)
+            elif r.rekening.strip() or r.rest or r.tarief is not None:
+                lijst.append({"categorie": r.categorie, "tarief": "", **waarden})
+            continue
         if not r.rekening.strip():
             continue
         cat = _norm(r.categorie)
@@ -324,6 +394,9 @@ class Boeking:
     verschil: Decimal
     lezer: str = ""
     stijl: str = "uitgebreid"
+    excl: bool = False              # omzetregels excl. btw (btw-bedrag apart) in plaats van incl.
+    bom: bool = True                # CSV met UTF-8-BOM
+    crlf: bool = False              # CSV met Windows-regeleinden
 
     @property
     def periode(self) -> str:
@@ -381,7 +454,10 @@ def maak_boeking(kassa: Kassaomzet, regels: list[Koppelregel], koppeling: dict,
     stijl = koppeling.get("stijl") or "uitgebreid"
     p = f"{kassa.eind:%Y-%m}"
     boekstuk = (boekstuk or "").strip() or standaard_boekstuk(kassa, koppeling)
+    excl = koppeling.get("bedragen") == "excl"
     controles: list[dict] = []
+    zonder_tarief = [r for r in regels if r.tarief is None and not r.rest]
+    regels, rest_controles = verdeel_rest(regels, kassa)
 
     betaald = sum((b.bedrag for b in betaalregels), NUL)
     fooi, overige = euro_centen(kassa.fooi), euro_centen(kassa.overige)
@@ -396,8 +472,8 @@ def maak_boeking(kassa: Kassaomzet, regels: list[Koppelregel], koppeling: dict,
     omzetregels = []
     for r in regels:
         code = btw_codes.get(str(r.tarief), "")
-        omzetregels.append(Boekregel(f"Omzet {p} {r.omschrijving}", r.rekening.strip(), r.bruto, code,
-                                     r.btw if code else None, soort="omzet"))
+        omzetregels.append(Boekregel(f"Omzet {p} {r.omschrijving}", r.rekening.strip(),
+                                     r.netto if excl and code else r.bruto, code, r.btw if code else None, soort="omzet"))
     overig = [(f"Overige inkomsten {p}", str(teg["overige_inkomsten"]).strip(), overige, "overig")] if overige else []
 
     if stijl == "compact":
@@ -407,6 +483,21 @@ def maak_boeking(kassa: Kassaomzet, regels: list[Koppelregel], koppeling: dict,
         for _, rek, bedrag, _ in tegen + overig:
             samen[rek] = samen.get(rek, NUL) + bedrag
         br += [Boekregel(oms, rek, bedrag, soort="tegen") for rek, bedrag in samen.items() if bedrag]
+    elif stijl == "samengevat":
+        # omzetregels met hun eigen omschrijving, daarna de tegenkant per tegenrekening ('Pinbetalingen 2026-10');
+        # de rekening waar het verschil op komt als laatste
+        br = [Boekregel(f"Omzet {MAANDEN[kassa.eind.month - 1]} {kassa.eind.year} {kassa.bedrijf}", soort="kop")]
+        br += omzetregels
+        samen, namen = {}, {}
+        labels = {"fooi": "Fooi", "verschil": "Verschil", "overig": "Overige inkomsten"}
+        for b in betaalregels:
+            if b.bedrag:
+                namen.setdefault(b.rekening.strip(), SOORT_LABEL.get(b.soort, "Betalingen"))
+        for _, rek, bedrag, s in tegen + overig:
+            samen[rek] = samen.get(rek, NUL) + bedrag
+            namen.setdefault(rek, labels.get(s, "Betalingen"))
+        volgorde = sorted(samen, key=lambda rek: verschil and rek == str(teg["verschil"]).strip())
+        br += [Boekregel(f"{namen[rek]} {p}", rek, samen[rek], soort="tegen") for rek in volgorde if samen[rek]]
     else:
         br = [Boekregel(f"Omzet {MAANDEN[kassa.eind.month - 1]} {kassa.eind.year} {kassa.bedrijf}", soort="kop")]
         br += [Boekregel(o, rek, bedrag, soort=s) for o, rek, bedrag, s in tegen]
@@ -415,6 +506,10 @@ def maak_boeking(kassa: Kassaomzet, regels: list[Koppelregel], koppeling: dict,
 
     # -- controles --
     controles.extend(dict(c) for c in kassa.controles)
+    controles.extend(rest_controles)
+    if zonder_tarief:
+        controle(controles, "FOUT", "Btw-tarief per categorie", "het rapport geeft geen tarief; kies er een (of maak "
+                 "er de restpost van) voor: " + ", ".join(r.categorie for r in zonder_tarief))
     hele_maand = (kassa.start.day == 1 and (kassa.start.year, kassa.start.month) == (kassa.eind.year, kassa.eind.month)
                   and (kassa.eind + timedelta(days=1)).day == 1)
     controle(controles, "OK" if hele_maand else "LET OP", "Periode is één hele maand",
@@ -475,7 +570,10 @@ def maak_boeking(kassa: Kassaomzet, regels: list[Koppelregel], koppeling: dict,
                            (["geen rekeningnummer bij: " + ", ".join(fout_nr)] if fout_nr else [])))
 
     som = sum((b.bedrag for b in br if b.bedrag is not None), NUL)
-    controle(controles, "OK" if som == 0 else "FOUT", "Boeking sluit op nul", f"som van alle regels {euro_nl(som)}")
+    if excl:                                             # omzet excl. btw: de btw-bedragen horen erbij
+        som += sum((b.btw_bedrag for b in br if b.btw_code and b.btw_bedrag is not None), NUL)
+    controle(controles, "OK" if som == 0 else "FOUT", "Boeking sluit op nul",
+             f"som van alle regels{' (incl. btw-bedragen)' if excl else ''} {euro_nl(som)}")
     controle(controles, "OK" if not verschil else "LET OP", "Verschil",
              f"{euro_nl(verschil)} op {teg['verschil']}: betalingen {euro_nl(betaald)} min omzet incl. btw "
              f"{euro_nl(omzet)}, fooi {euro_nl(fooi)} en overige inkomsten {euro_nl(overige)}")
@@ -486,11 +584,15 @@ def maak_boeking(kassa: Kassaomzet, regels: list[Koppelregel], koppeling: dict,
 
     return Boeking(kassa.bedrijf, kassa.start, kassa.eind, boekstuk, str(koppeling.get("dagboek") or "10").strip(), br,
                    controles, omzet, sum((r.btw for r in regels), NUL), betaald, fooi, overige, verschil,
-                   kassa.lezer, stijl)
+                   kassa.lezer, stijl, excl, koppeling.get("csv_bom", True) is not False,
+                   koppeling.get("csv_regeleinde") == "CRLF")
 
 
 def naar_fmutac(boeking: Boeking) -> bytes:
-    """De boeking als FMUTAC-CSV voor de kasboekimport van Asperion (UTF-8 met BOM, ';', punt als decimaalteken)."""
+    """De boeking als FMUTAC-CSV voor de kasboekimport van Asperion (UTF-8, ';', punt als decimaalteken).
+
+    BOM en regeleinden volgen de koppeling van de klant (standaard: met BOM, LF).
+    """
     datum = f"{boeking.eind:%d%m%Y}"
     regels = []
     for nr, b in enumerate(boeking.regels):
@@ -504,7 +606,8 @@ def naar_fmutac(boeking: Boeking) -> bytes:
             v[20] = b.btw_code
             v[21] = f"{b.btw_bedrag:.2f}" if b.btw_bedrag is not None else ""
         regels.append(";".join(v))
-    return ("﻿" + "\n".join(regels) + "\n").encode("utf-8")
+    eol = "\r\n" if boeking.crlf else "\n"
+    return (("\ufeff" if boeking.bom else "") + eol.join(regels) + eol).encode("utf-8")
 
 
 def asperion_weergave(boeking: Boeking) -> list[dict]:
@@ -517,7 +620,7 @@ def asperion_weergave(boeking: Boeking) -> list[dict]:
         if b.bedrag is None:
             continue
         btw = b.btw_bedrag or NUL
-        bedrag = b.bedrag - btw if b.btw_code else b.bedrag
+        bedrag = b.bedrag - btw if b.btw_code and not boeking.excl else b.bedrag
         uit.append({"rekening": b.rekening, "debet": -bedrag if bedrag < 0 else NUL,
                     "credit": bedrag if bedrag > 0 else NUL, "btw_code": b.btw_code, "btw": btw if b.btw_code else NUL})
     return uit

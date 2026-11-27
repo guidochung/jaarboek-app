@@ -216,3 +216,37 @@ def test_black_pepper_summary_rapporten():
 def test_verschillende_kassas_samen_geeft_fout():
     with pytest.raises(OmzetFout, match="verschillende kassasystemen"):
         lees_omzet([("k.pdf", DATA / "kazoku_omzetlijst_2026-10.pdf"), ("n.pdf", DATA / "ninja_boekhouding_2026-01.pdf")])
+
+
+def test_cafe_bica_booq_csv_is_gelijk_aan_de_boekhouder():
+    """booq geeft geen btw-tarief per categorie: vast tarief uit de koppeling, Verpakking is de restpost.
+
+    Omzet excl. btw, cadeaubonnen op 1259, al het andere (incl. fooi, cadeaukaarten en statiegeld) op 1255.
+    """
+    k = lees_omzet([("bica.pdf", DATA / "bica_omzet_2026-10.pdf")])
+    assert (k.bedrijf, k.lezer) == ("Cafe Bica", "booq · Rapportage diensten op omzetcategorie (PDF)")
+    assert all(o.tarief is None for o in k.omzet) and len(k.omzet) == 11
+    b = _boeking(k, _klant("cafe_bica"))
+    assert not b.fout, [c for c in b.controles if c["status"] == "FOUT"]
+    assert naar_fmutac(b) == (DATA / "bica_omzet_2026-10_verwacht.csv").read_bytes()
+    status = {c["controle"]: c["status"] for c in b.controles}
+    assert status["Restpost Verpakking"] == "OK" and status["Verschil"] == "LET OP"          # € 98,45 op 1255
+    assert status["Omzet 9% gelijk aan btw-overzicht"] == status["Omzet 21% gelijk aan btw-overzicht"] == "OK"
+
+
+def test_booq_zonder_tarief_blokkeert_en_wordt_bewaard():
+    k = lees_omzet([("bica.pdf", DATA / "bica_omzet_2026-10.pdf")])
+    koppeling = _klant("cafe_bica")
+    koppeling["categorieen"] = [c for c in koppeling["categorieen"] if c["categorie"] != "Matcha"]
+    regels = stel_koppeling_voor(k, koppeling)
+    matcha = next(r for r in regels if r.categorie == "Matcha")
+    assert (matcha.tarief, matcha.rekening, matcha.vast) == (None, "", True)
+    b = maak_boeking(k, regels, koppeling)
+    assert b.fout and any(c["controle"] == "Btw-tarief per categorie" for c in b.controles)
+    matcha.tarief, matcha.rekening, matcha.omschrijving = 9, "8080", "matcha"           # gekozen in de app
+    matcha.btw = matcha.bruto * 9 / 109
+    nieuw = bewaar_koppeling(koppeling, regels)
+    assert {"categorie": "Matcha", "tarief": "", "omschrijving": "matcha", "rekening": "8080", "btw_tarief": "9",
+            "restpost": False} in nieuw["categorieen"]
+    assert naar_fmutac(_boeking(k, koppeling_uit_json(json.dumps(nieuw)))) == \
+        (DATA / "bica_omzet_2026-10_verwacht.csv").read_bytes()

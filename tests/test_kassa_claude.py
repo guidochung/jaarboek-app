@@ -26,6 +26,10 @@ def _opname(klant):
     return json.loads((DATA / f"kassa_claude_{klant}_opname.json").read_text(encoding="utf-8"))
 
 
+def _opname_pad(naam):
+    return json.loads((DATA / naam).read_text(encoding="utf-8"))
+
+
 def _klant(slug):
     return koppeling_uit_json((DATA / f"omzet_koppeling_{slug}.json").read_text(encoding="utf-8"))
 
@@ -97,3 +101,28 @@ def test_ongeldig_antwoord_geeft_nette_fout():
     antwoord["periode_tot"] = "eind januari"
     with pytest.raises(OmzetFout, match="einddatum"):
         naar_kassaomzet(antwoord, "", ["x"])
+
+
+def test_cafe_bica_zoals_de_boekhouder_het_wil():
+    """booq-rapport: omzet per tarief (basisbedrag + btw), cadeaubonnen op 1259, al het andere op 1255.
+
+    Fooi, uitgegeven cadeaukaarten en statiegeld worden niet apart geboekt: ze zitten in het verschil op 1255.
+    Het antwoord is met de hand gemaakt volgens de instructie (geen opname van een echte run).
+    """
+    pdf = DATA / "bica_omzet_2026-10.pdf"
+    kassa = lees_met_claude([(pdf.name, pdf.read_bytes())],
+                            ClaudeAI(client=NepClaude(kassa=_opname_pad("kassa_claude_bica_voorbeeld.json"))))
+    b = _boeking(kassa, "cafe_bica")
+    status = {c["controle"]: c["status"] for c in b.controles}
+    assert not b.fout and status["Bedragen staan in het rapport"] == "OK"
+    assert "Door Claude uitgerekende bedragen" not in status            # incl. = basisbedrag + btw uit het rapport
+    assert b.verschil == D("98.45") and status["Niet geboekte posten in het rapport"] == "LET OP"
+    weergave = Counter((r["rekening"], r["debet"], r["credit"], r["btw"]) for r in asperion_weergave(b))
+    assert weergave == Counter([("8100", D(0), D("55224.61"), D("4970.21")), ("8000", D(0), D("766.67"), D("161.00")),
+                                ("1259", D("235.21"), D(0), D(0)), ("1255", D("60887.28"), D(0), D(0))])
+
+
+def test_v_pay_is_een_pinbetaling():
+    from jaarboek.omzet import soort_betaling
+    assert {soort_betaling(n) for n in ("V-pay", "V PAY", "vpay", "Visa Debit", "Eurocard Mastercard")} == {"pin"}
+    assert soort_betaling("DIsh Giftcard") == "cadeaubonnen" and soort_betaling("Klearly contant") == "contant"

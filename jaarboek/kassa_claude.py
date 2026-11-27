@@ -1,12 +1,15 @@
 """Vangnet voor onbekende kassaformaten: Claude leest het rapport, code controleert.
 
 Claude krijgt de tekst van de bestanden (PDF met kolomopmaak, Excel als tabeltekst) en zet die om naar
-het tussenformaat (`Kassaomzet`). Daarna gelden harde controles, zodat een leesfout nooit ongemerkt in de
-boeking komt:
-- elk bedrag dat Claude niet als 'afgeleid' meldt, moet letterlijk in het rapport staan (anders FOUT);
+het tussenformaat (`Kassaomzet`). Geboekt worden alleen omzet (credit) en betalingen (debet); wat de
+betalingen meer of minder zijn dan de omzet (fooi, verkochte cadeaukaarten, statiegeld …) komt als
+'verschil' op de verschilrekening (1255). Die posten worden wel getoond, zodat het verschil te verklaren is.
+
+Harde controles, zodat een leesfout nooit ongemerkt in de boeking komt:
+- elk geboekt bedrag moet letterlijk in het rapport staan, of als basisbedrag + btw (anders FOUT);
 - de omzetregels moeten per tarief optellen tot het btw-overzicht van het rapport (in maak_boeking);
-- betalingen min omzet, fooi en overige inkomsten = verschil (in maak_boeking).
-Afgeleide bedragen en een btw-overzicht dat Claude zelf heeft uitgerekend krijgen LET OP.
+- betalingen min omzet = verschil (in maak_boeking).
+Bedragen die Claude echt zelf heeft uitgerekend krijgen LET OP.
 """
 from __future__ import annotations
 
@@ -23,8 +26,8 @@ MAX_TEKENS = 300_000                 # ± 80.000 tokens; grotere rapporten eerst
 GETAL = {"type": "number"}
 SCHEMA = {
     "type": "object", "additionalProperties": False,
-    "required": ["kassasysteem", "bedrijf", "periode_van", "periode_tot", "omzet", "betalingen", "fooi",
-                 "overige_inkomsten", "rapport_totalen", "niet_geboekt", "opmerkingen"],
+    "required": ["kassasysteem", "bedrijf", "periode_van", "periode_tot", "omzet", "betalingen", "rapport_totalen",
+                 "niet_geboekt", "opmerkingen"],
     "properties": {
         "kassasysteem": {"type": "string"},
         "bedrijf": {"type": "string"},
@@ -37,37 +40,38 @@ SCHEMA = {
         "betalingen": {"type": "array", "items": {
             "type": "object", "additionalProperties": False, "required": ["betaalwijze", "bedrag", "afgeleid"],
             "properties": {"betaalwijze": {"type": "string"}, "bedrag": GETAL, "afgeleid": {"type": "boolean"}}}},
-        "fooi": GETAL, "overige_inkomsten": GETAL,
         "rapport_totalen": {"type": "array", "items": {
             "type": "object", "additionalProperties": False, "required": ["tarief", "incl_btw", "btw", "afgeleid"],
             "properties": {"tarief": {"type": "integer"}, "incl_btw": GETAL, "btw": GETAL,
                            "afgeleid": {"type": "boolean"}}}},
         "niet_geboekt": {"type": "array", "items": {
-            "type": "object", "additionalProperties": False, "required": ["omschrijving", "bedrag"],
-            "properties": {"omschrijving": {"type": "string"}, "bedrag": GETAL}}},
+            "type": "object", "additionalProperties": False, "required": ["omschrijving", "bedrag", "afgeleid"],
+            "properties": {"omschrijving": {"type": "string"}, "bedrag": GETAL, "afgeleid": {"type": "boolean"}}}},
         "opmerkingen": {"type": "array", "items": {"type": "string"}},
     },
 }
 
 SYSTEM = """Je zet het maandrapport van een horeca-kassasysteem om naar gegevens voor één omzetboeking in de \
-boekhouding. Regels:
+boekhouding. De boekhouder boekt alleen de omzet (credit) en de betalingen (debet); wat de betalingen meer of \
+minder zijn dan de omzet, komt als verschil op een vaste rekening. Regels:
 - omzet: één regel per OMZETCATEGORIE van het rapport (niet per product) en per btw-tarief; een categorie met \
-omzet in twee tarieven krijgt twee regels. Heeft het rapport geen categorieën, of tellen de categorieën niet op \
-tot het btw-overzicht van het rapport, maak dan één regel per tarief met groep "Omzet <tarief>%" en de bedragen \
-uit het btw-overzicht. incl_btw = bedrag inclusief btw, btw = btw-bedrag (0 als het er niet staat).
-- Neem bedragen letterlijk over uit het rapport. Moet je een bedrag uitrekenen (optellen van dagen, een splitsing \
-naar tarief), zet dan afgeleid=true. Verzin nooit bedragen.
-- Kortingen, fooi, statiegeld en andere posten die volgens het rapport geen omzet zijn, horen niet in omzet.
-- betalingen: per betaalwijze het ontvangen bedrag, op het laagste detailniveau (geen subtotalen naast hun \
-uitsplitsing). Gebruik de namen uit het rapport.
-- fooi: alleen fooi die in de betalingen hierboven zit (bovenop de omzet betaald). Staat fooi los van de \
-betalingen, zet fooi op 0 en noem hem bij niet_geboekt. overige_inkomsten: idem voor overige inkomsten.
-- rapport_totalen: het btw-overzicht van het rapport per tarief (incl. btw en btw). Geeft het rapport geen \
-totalen per tarief, reken ze uit en zet afgeleid=true.
-- niet_geboekt: andere bedragen die een boekhouder moet zien maar die niet in omzet of betalingen zitten.
+omzet in twee tarieven krijgt twee regels. Heeft het rapport geen categorieën, staat er niet bij welk tarief een \
+categorie heeft, of tellen de categorieën niet op tot het btw-overzicht, maak dan één regel per tarief met groep \
+"Omzet <tarief>%" en de bedragen uit het btw-overzicht. incl_btw = bedrag inclusief btw, btw = btw-bedrag zoals \
+in het rapport (0 als het er niet staat).
+- Neem bedragen letterlijk over. Moet je een bedrag uitrekenen (optellen, basisbedrag + btw, splitsen), zet dan \
+afgeleid=true. Verzin nooit bedragen.
+- betalingen: elke betaalwijze met het ontvangen bedrag, op het laagste detailniveau, ook betalingen met \
+cadeaukaarten of -bonnen. Geen subtotalen of paginatotalen. Gebruik de namen uit het rapport.
+- niet_geboekt: alles wat geen omzet en geen betaling is maar wel relevant voor de boekhouder: fooi, verkochte \
+of uitgegeven cadeaukaarten, statiegeld, overige inkomsten, kortingen, kastransacties. Elke post apart, met het \
+bedrag zoals in het rapport; tel posten niet bij elkaar op.
+- rapport_totalen: het btw-overzicht van het rapport per tarief (incl. btw en btw). Staat alleen het \
+basisbedrag er, dan incl_btw = basisbedrag + btw (afgeleid=true). Geeft het rapport geen totalen per tarief, \
+reken ze uit (afgeleid=true).
 - periode_van/periode_tot: kalenderdatums JJJJ-MM-DD. Loopt de kassadag door tot de volgende dag (bijv. \
 12:00 tot 12:00), dan is periode_tot de laatste dag van de maand.
-- kassasysteem: de titel of kop waaraan je dit soort rapport herkent.
+- kassasysteem: de naam van het kassasysteem en de titel waaraan je dit soort rapport herkent.
 - opmerkingen: maximaal 5 korte punten in het Nederlands over twijfels of dingen die de boekhouder moet weten."""
 
 
@@ -161,6 +165,11 @@ def staat_in(x: Decimal, schoon: str) -> bool:
     return any(re.search(rf"(?<![\d.,]){re.escape(v)}(?![\d]|[.,]\d)", schoon) for v in _varianten(x))
 
 
+def in_rapport(bedrag: Decimal, btw: Decimal, schoon: str) -> bool:
+    """Staat het bedrag in het rapport: letterlijk, of als basisbedrag + btw (allebei letterlijk)?"""
+    return staat_in(bedrag, schoon) or (bool(btw) and staat_in(bedrag - btw, schoon) and staat_in(btw, schoon))
+
+
 def naar_kassaomzet(r: dict, tekst: str, namen: list[str]) -> Kassaomzet:
     van, tot = _iso(r["periode_van"], "begindatum"), _iso(r["periode_tot"], "einddatum")
     if van.day == 1 and tot.day == 1 and tot > van and (tot - van).days >= 27:
@@ -172,29 +181,32 @@ def naar_kassaomzet(r: dict, tekst: str, namen: list[str]) -> Kassaomzet:
     totalen = {int(t["tarief"]): (_d(t["incl_btw"]), _d(t["btw"])) for t in r["rapport_totalen"]}
     niet = [(str(n["omschrijving"]), _d(n["bedrag"])) for n in r["niet_geboekt"] if _d(n["bedrag"])]
 
+    # Geboekte bedragen (en het btw-overzicht waartegen gecontroleerd wordt) moeten in het rapport staan
     controles: list[dict] = []
     schoon = re.sub(r"\s+", " ", tekst)
-    letterlijk = [(f"omzet {o.groep} {o.tarief}%", o.bruto) for o in omzet if not o.afgeleid and o.bruto]
-    letterlijk += [(f"betaling {b['betaalwijze']}", _d(b["bedrag"])) for b in r["betalingen"]
-                   if _d(b["bedrag"]) and not b["afgeleid"]]
-    letterlijk += [(f"btw-overzicht {t['tarief']}%", _d(t["incl_btw"])) for t in r["rapport_totalen"]
-                   if _d(t["incl_btw"]) and not t["afgeleid"]]
-    letterlijk += [(naam, _d(r[k])) for naam, k in (("fooi", "fooi"), ("overige inkomsten", "overige_inkomsten"))
-                   if _d(r[k])]
-    weg = [f"{wat} {euro_nl(x)}" for wat, x in letterlijk if not staat_in(x, schoon)]
+    posten = [(f"omzet {o.groep} {o.tarief}%", o.bruto, o.btw or NUL, o.afgeleid) for o in omzet if o.bruto]
+    posten += [(f"btw-overzicht {t['tarief']}%", _d(t["incl_btw"]), _d(t["btw"]), bool(t["afgeleid"]))
+               for t in r["rapport_totalen"] if _d(t["incl_btw"])]
+    posten += [(f"betaling {b['betaalwijze']}", _d(b["bedrag"]), NUL, bool(b["afgeleid"]))
+               for b in r["betalingen"] if _d(b["bedrag"])]
+    gevonden = [(wat, x, afg, in_rapport(x, btw, schoon)) for wat, x, btw, afg in posten]
+    weg = [f"{wat} {euro_nl(x)}" for wat, x, afg, ok in gevonden if not ok and not afg]
+    zelf = [f"{wat} {euro_nl(x)}" for wat, x, afg, ok in gevonden if not ok and afg]
     controle(controles, "FOUT" if weg else "OK", "Bedragen staan in het rapport",
              ("niet gevonden in het rapport: " + "; ".join(weg)) if weg else
-             f"alle {len(letterlijk)} overgenomen bedragen staan letterlijk in het rapport")
-    afgeleid = [f"omzet {o.groep} {o.tarief}% {euro_nl(o.bruto)}" for o in omzet if o.afgeleid]
-    afgeleid += [f"betaling {b['betaalwijze']} {euro_nl(_d(b['bedrag']))}" for b in r["betalingen"] if b["afgeleid"]]
-    if afgeleid:
-        controle(controles, "LET OP", "Door Claude uitgerekende bedragen", "; ".join(afgeleid))
-    if any(t["afgeleid"] for t in r["rapport_totalen"]):
-        controle(controles, "LET OP", "Btw-overzicht", "het rapport heeft geen btw-overzicht per tarief; Claude "
-                 "heeft het uitgerekend, dus de omzetcontrole per tarief is niet onafhankelijk")
+             f"alle {len(gevonden) - len(zelf)} overgenomen bedragen staan in het rapport (letterlijk of als "
+             "basisbedrag + btw)")
+    if zelf:
+        controle(controles, "LET OP", "Door Claude uitgerekende bedragen", "staan niet als zodanig in het rapport: "
+                 + "; ".join(zelf))
+    los = [f"{n['omschrijving']} {euro_nl(_d(n['bedrag']))}" for n in r["niet_geboekt"]
+           if _d(n["bedrag"]) and not n["afgeleid"] and not staat_in(_d(n["bedrag"]), schoon)]
+    if los:
+        controle(controles, "LET OP", "Toelichtende posten", "niet gevonden in het rapport (niet geboekt, wel ter "
+                 "verklaring van het verschil): " + "; ".join(los))
     return Kassaomzet(str(r["bedrijf"]).strip(), van, tot, f"Claude · {str(r['kassasysteem']).strip() or 'onbekend'}",
-                      omzet, betalingen, _d(r["fooi"]), _d(r["overige_inkomsten"]), totalen, "btw-overzicht", niet,
-                      controles, [str(o) for o in r["opmerkingen"]][:5], list(namen), (tot - van).days + 1, True)
+                      omzet, betalingen, NUL, NUL, totalen, "btw-overzicht", niet, controles,
+                      [str(o) for o in r["opmerkingen"]][:5], list(namen), (tot - van).days + 1, True)
 
 
 def lees_met_claude(bestanden, ai) -> Kassaomzet:

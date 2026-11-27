@@ -34,10 +34,10 @@ from jaarboek.doorrol import STAPPEN, DoorrolFout, bronnen, formule_tekst, pas_a
 from jaarboek.inlezen import InvoerFout  # noqa: E402
 from jaarboek.kassa_claude import lees_met_claude  # noqa: E402
 from jaarboek.kassalezers import lees_omzet  # noqa: E402
-from jaarboek.omzet import (STIJLEN, TEGENREKENING_LABELS, OmzetFout, OnbekendFormaat,  # noqa: E402
-                            OnvolledigeInvoer, asperion_weergave, bewaar_koppeling, euro_nl, koppeling_uit_json,
-                            laad_koppeling, maak_boeking, naar_fmutac, prefix_uit_naam, standaard_boekstuk,
-                            stel_betalingen_voor, stel_koppeling_voor)
+from jaarboek.omzet import (BEDRAGEN, NUL, STIJLEN, TEGENREKENING_LABELS, OmzetFout,  # noqa: E402
+                            OnbekendFormaat, OnvolledigeInvoer, asperion_weergave, bewaar_koppeling, btw_uit_bruto,
+                            euro_nl, koppeling_uit_json, laad_koppeling, maak_boeking, naar_fmutac, prefix_uit_naam,
+                            standaard_boekstuk, stel_betalingen_voor, stel_koppeling_voor)
 from jaarboek.render import RenderFout, pdf_pagina  # noqa: E402
 from jaarboek.structuur import MAANDEN, fmt  # noqa: E402
 
@@ -337,13 +337,21 @@ def pagina_omzet(ai) -> None:
         oms = s2.text_input("Omschrijving (compact)", value=str(koppeling.get("omschrijving") or "Omzet {periode}"),
                             key=f"oz_oms_{sleutel}", disabled=stijl != "compact",
                             help="Op elke regel in de compacte stijl. {periode} = 2026-01, ook {maand}, {jaar}, {bedrijf}.")
+        b1, b2, b3 = st.columns([3, 1, 1])
+        bedragen = b1.radio("Bedragen", list(BEDRAGEN), format_func=BEDRAGEN.get, key=f"oz_bedragen_{sleutel}",
+                            index=list(BEDRAGEN).index(koppeling.get("bedragen") or "incl"), horizontal=True,
+                            help="Zoals het kantoor het CSV-bestand voor deze klant inleest.")
+        bom = b2.checkbox("CSV met BOM", value=koppeling.get("csv_bom", True) is not False, key=f"oz_bom_{sleutel}")
+        crlf = b3.checkbox("Windows-regeleinden", value=koppeling.get("csv_regeleinde") == "CRLF",
+                           key=f"oz_crlf_{sleutel}")
         st.caption("Standaard-tegenrekeningen (per soort betaalwijze, plus fooi, overige inkomsten en verschil)")
         kol, teg = st.columns(5), {}
         for i, (s, label) in enumerate(TEGENREKENING_LABELS.items()):
             teg[s] = kol[i % 5].text_input(label, value=str(koppeling["tegenrekeningen"].get(s, "")),
                                            key=f"oz_teg_{s}_{sleutel}").strip()
     koppeling = {**koppeling, "boekstuk_prefix": prefix.strip(), "dagboek": dagboek.strip() or "10", "stijl": stijl,
-                 "omschrijving": oms.strip() or "Omzet {periode}", "tegenrekeningen": teg}
+                 "omschrijving": oms.strip() or "Omzet {periode}", "tegenrekeningen": teg, "bedragen": bedragen,
+                 "csv_bom": bom, "csv_regeleinde": "CRLF" if crlf else "LF"}
     voorstel = stel_koppeling_voor(kassa, koppeling)
     betaal = stel_betalingen_voor(kassa, koppeling)
 
@@ -351,17 +359,26 @@ def pagina_omzet(ai) -> None:
     nieuw = [r for r in voorstel if not r.bekend or not r.rekening]
     with koppel_plek, st.expander(f"Koppeling omzetcategorieën · {len(voorstel)}", expanded=bool(nieuw),
                                   icon=":material/account_tree:"):
+        vrij = any(r.vast for r in voorstel)               # kassa zonder btw-tarief per categorie (bijv. booq)
         st.caption(f"Koppeling: {bron}. Elke kassacategorie wordt één regel (alle producten opgeteld). "
-                   "Een categorie met omzet in twee btw-tarieven krijgt per tarief een regel."
+                   + ("Deze kassa geeft geen btw-tarief per categorie: kies het tarief, en maak van één categorie de "
+                      "'Rest'. Die vangt het verschil met het btw-overzicht op en wordt zo nodig over twee tarieven "
+                      "verdeeld." if vrij else
+                      "Een categorie met omzet in twee btw-tarieven krijgt per tarief een regel.")
                    + (f" Nieuw in deze maand: {', '.join(dict.fromkeys(r.categorie for r in nieuw))}; "
                       "vul de grootboekrekening in." if nieuw else ""))
-        df = pd.DataFrame([{"Kassacategorie": r.categorie, "Btw": f"{r.tarief}%", "Omschrijving": r.omschrijving,
-                            "Grootboek": r.rekening, "Incl. btw": euro_nl(r.bruto), "Btw-bedrag": euro_nl(r.btw),
+        tariefkeuze = ["9%", "21%", "0%", "Rest"]
+        df = pd.DataFrame([{"Kassacategorie": r.categorie,
+                            "Btw": "Rest" if r.rest else ("" if r.tarief is None else f"{r.tarief}%"),
+                            "Omschrijving": r.omschrijving, "Grootboek": r.rekening, "Incl. btw": euro_nl(r.bruto),
+                            "Btw-bedrag": "" if r.rest or r.tarief is None else euro_nl(r.btw),
                             "Status": "" if r.bekend else "Nieuw"} for r in voorstel])
         bewerkt = st.data_editor(
             df, key=f"oz_editor_{sig}_{sleutel}", hide_index=True, width="stretch", num_rows="fixed",
-            disabled=["Kassacategorie", "Btw", "Incl. btw", "Btw-bedrag", "Status"],
+            disabled=["Kassacategorie", "Incl. btw", "Btw-bedrag", "Status"] + ([] if vrij else ["Btw"]),
             column_config={
+                "Btw": st.column_config.SelectboxColumn(options=tariefkeuze, help="Vast btw-tarief, of de restpost")
+                if vrij else st.column_config.TextColumn(),
                 "Omschrijving": st.column_config.TextColumn(width="medium", help="Komt na 'Omzet <periode>' in de "
                                                                                "uitgebreide stijl"),
                 "Grootboek": st.column_config.TextColumn(validate=r"^\d+$", help="Rekeningnummer in Asperion"),
@@ -370,6 +387,12 @@ def pagina_omzet(ai) -> None:
     for r, (_, rij) in zip(voorstel, bewerkt.iterrows()):
         r.omschrijving = str(rij["Omschrijving"] or "").strip() or r.categorie
         r.rekening = str(rij["Grootboek"] or "").strip()
+        if r.vast:                                         # gekozen tarief of restpost
+            keuze = str(rij["Btw"] or "")
+            r.rest = keuze == "Rest"
+            r.tarief = int(keuze.rstrip("%")) if keuze.rstrip("%").isdigit() else None
+            r.btw = btw_uit_bruto(r.bruto, r.tarief) if r.tarief is not None else NUL
+            r.netto = r.bruto - r.btw
 
     # Koppeltabel: tegenrekening per betaalwijze
     herkomst = {"koppeling": "Koppeling", "standaard": "Standaard", "nieuw": "Nieuw"}
