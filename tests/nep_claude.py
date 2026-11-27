@@ -31,11 +31,13 @@ class _Messages:
         if self.ouder.weiger:
             return _antwoord({}, "", stop_reason="refusal")
         schema = kw["output_config"]["format"]["schema"]["properties"]
-        invoer = kw["system"] + kw["messages"][0]["content"]
+        inhoud = kw["messages"][0]["content"]          # tekst, of blokken (tekst + foto's)
+        tekst = inhoud if isinstance(inhoud, str) else "\n".join(b.get("text", "") for b in inhoud if b["type"] == "text")
+        invoer = kw["system"] + tekst
         if "rapport_totalen" in schema:                # kassarapport lezen (omzet naar Asperion)
             k = self.ouder.kassa
             if k is not None:
-                return _antwoord(k(kw["messages"][0]["content"]) if callable(k) else k, invoer)
+                return _antwoord(k(tekst) if callable(k) else k, invoer)
             return _antwoord({"kassasysteem": "demo", "bedrijf": "Demo", "periode_van": "2026-01-01",
                               "periode_tot": "2026-01-31", "omzet": [], "betalingen": [], "fooi": 0,
                               "overige_inkomsten": 0, "rapport_totalen": [], "niet_geboekt": [],

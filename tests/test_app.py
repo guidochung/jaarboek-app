@@ -34,7 +34,7 @@ def test_omzet_onderdeel_via_zijbalk(tmp_path, monkeypatch):
     assert not at.exception
     assert not [b for b in at.button if b.label == "Maak jaarverslag"]
     assert len(at.get("file_uploader")) == 2                     # kassarapporten + koppeling
-    assert any("Nog nodig: de omzetrapporten uit de kassa" in c.value for c in at.caption)
+    assert any("Nog nodig: de omzetrapporten uit de kassa (Excel, PDF of foto)" in c.value for c in at.caption)
     at.radio(key="onderdeel").set_value("Jaarverslag").run()
     assert any(b.label == "Maak jaarverslag" for b in at.button)
 

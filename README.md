@@ -87,6 +87,7 @@ Kassa-omzet van één maand → één kasboekboeking als FMUTAC-CSV voor Asperio
   - Boekhouding overzicht (PDF)
 
   Een onbekend formaat kan Claude lezen (`jaarboek/kassa_claude.py`, knop **Lees met Claude**, ca. $0,05 – $0,10). Daarna moet elk overgenomen bedrag letterlijk in het rapport staan; anders FOUT.
+  Ook foto's (JPG/JPEG/PNG) leest Claude; ze worden rechtgezet en verkleind. Bij een foto zijn de bedragen niet automatisch na te lezen (LET OP); de sommen per btw-tarief en de betalingen blijven harde controles.
 - **Tussenformaat** (`Kassaomzet` in `jaarboek/omzet.py`): omzet per categorie (of per btw-tarief), betalingen per betaalwijze, fooi, overige inkomsten en het btw-overzicht van de kassa. Boeking, controles en CSV zijn voor elk kassasysteem gelijk.
 - **Koppeling per klant**: categorie (+ tarief) → grootboekrekening, betaalwijze → tegenrekening, dagboek, boekstukprefix en boekingsstijl:
   - **uitgebreid**: elke betaalwijze apart (Bar Bellini)

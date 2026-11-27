@@ -60,7 +60,7 @@ class ClaudeAI:
         self.gebruik: list[Gebruik] = []
 
     # ------------------------------------------------------------------
-    def _vraag(self, taak: str, system: str, inhoud: str, schema: dict, max_tokens: int,
+    def _vraag(self, taak: str, system: str, inhoud: str | list, schema: dict, max_tokens: int,
                effort: str | None = None) -> dict:
         kwargs = dict(
             model=MODEL, max_tokens=max_tokens, system=system,

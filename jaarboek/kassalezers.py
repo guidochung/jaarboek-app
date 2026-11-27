@@ -645,6 +645,8 @@ def lees_booq(naam: str, tekst: str, regels: list[list[Woord]]) -> Kassaomzet:
 # ==========================================================================
 def _herken(naam: str, data: bytes):
     """-> (soort, inhoud). Soort: dag, product, summary_maand, summary_categorie, omzetlijst, boekhouding, booq."""
+    if data[:3] == b"\xff\xd8\xff" or data[:8] == b"\x89PNG\r\n\x1a\n":
+        raise OnbekendFormaat(f"{naam}: dit is een foto; die kan alleen Claude lezen.")
     if data[:2] == b"PK":
         r = lees_kassarapport(data, naam)                # OnbekendFormaat als A1 geen bekende titel is
         return ("dag" if isinstance(r, Dagrapport) else "product"), r

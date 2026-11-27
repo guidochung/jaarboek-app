@@ -10,9 +10,13 @@ Harde controles, zodat een leesfout nooit ongemerkt in de boeking komt:
 - de omzetregels moeten per tarief optellen tot het btw-overzicht van het rapport (in maak_boeking);
 - betalingen min omzet = verschil (in maak_boeking).
 Bedragen die Claude echt zelf heeft uitgerekend krijgen LET OP.
+
+Foto's (JPG/PNG) gaan als afbeelding mee, rechtgezet en verkleind. Een foto heeft geen tekst om bedragen in
+na te lezen: dat wordt LET OP ('leg de boeking naast de foto'); de sommen per tarief blijven harde controles.
 """
 from __future__ import annotations
 
+import base64
 import io
 import re
 from datetime import date, datetime, timedelta
@@ -22,6 +26,8 @@ from .omzet import (NUL, Betaalpost, Kassaomzet, OmzetFout, Omzetpost, controle,
                     soort_betaling)
 
 MAX_TEKENS = 300_000                 # ± 80.000 tokens; grotere rapporten eerst inkorten
+FOTO_MAX = 1568                      # langste zijde in pixels; groter verkleint Claude zelf ook
+MAX_FOTOS = 10
 
 GETAL = {"type": "number"}
 SCHEMA = {
@@ -75,6 +81,8 @@ reken ze uit (afgeleid=true).
 - periode_van/periode_tot: kalenderdatums JJJJ-MM-DD. Loopt de kassadag door tot de volgende dag (bijv. \
 12:00 tot 12:00), dan is periode_tot de laatste dag van de maand.
 - kassasysteem: de naam van het kassasysteem en de titel waaraan je dit soort rapport herkent.
+- Krijg je foto's van het rapport: lees de cijfers zorgvuldig. Twijfel je over een cijfer (onscherp, afgesneden, \
+gevouwen), noem het dan in opmerkingen.
 - opmerkingen: maximaal 5 korte punten in het Nederlands over twijfels of dingen die de boekhouder moet weten."""
 
 
@@ -117,6 +125,26 @@ def _excel_tekst(data: bytes, naam: str) -> str:
     except Exception as e:                               # noqa: BLE001
         raise OmzetFout(f"{naam}: kan dit Excel-bestand niet openen ({e}).") from None
     return "\n".join(delen)
+
+
+def is_foto(data: bytes) -> bool:
+    return data[:3] == b"\xff\xd8\xff" or data[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def foto_blok(data: bytes, naam: str) -> dict:
+    """Foto -> afbeeldingsblok voor Claude: rechtgezet (EXIF-draaiing van telefoons) en verkleind, als JPEG."""
+    from PIL import Image, ImageOps
+
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            img = ImageOps.exif_transpose(img).convert("RGB")
+    except Exception as e:                               # noqa: BLE001
+        raise OmzetFout(f"{naam}: kan deze foto niet openen ({e}).") from None
+    img.thumbnail((FOTO_MAX, FOTO_MAX))
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=90)
+    return {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                                        "data": base64.b64encode(buf.getvalue()).decode()}}
 
 
 def tekst_van_bestanden(bestanden) -> str:
@@ -173,7 +201,7 @@ def in_rapport(bedrag: Decimal, btw: Decimal, schoon: str) -> bool:
     return staat_in(bedrag, schoon) or (bool(btw) and staat_in(bedrag - btw, schoon) and staat_in(btw, schoon))
 
 
-def naar_kassaomzet(r: dict, tekst: str, namen: list[str]) -> Kassaomzet:
+def naar_kassaomzet(r: dict, tekst: str, namen: list[str], foto: bool = False) -> Kassaomzet:
     van, tot = _iso(r["periode_van"], "begindatum"), _iso(r["periode_tot"], "einddatum")
     if van.day == 1 and tot.day == 1 and tot > van and (tot - van).days >= 27:
         tot -= timedelta(days=1)                         # 1-9 t/m 1-10 (kassadag tot de volgende dag) = september
@@ -197,15 +225,22 @@ def naar_kassaomzet(r: dict, tekst: str, namen: list[str]) -> Kassaomzet:
     gevonden = [(wat, x, afg, in_rapport(x, btw, schoon)) for wat, x, btw, afg in posten]
     weg = [f"{wat} {euro_nl(x)}" for wat, x, afg, ok in gevonden if not ok and not afg]
     zelf = [f"{wat} {euro_nl(x)}" for wat, x, afg, ok in gevonden if not ok and afg]
-    controle(controles, "FOUT" if weg else "OK", "Bedragen staan in het rapport",
-             ("niet gevonden in het rapport: " + "; ".join(weg)) if weg else
-             f"alle {len(gevonden) - len(zelf)} overgenomen bedragen staan in het rapport (letterlijk of als "
-             "basisbedrag + btw)")
+    if foto:                                             # geen tekst om in na te lezen
+        controle(controles, "LET OP", "Gelezen van een foto",
+                 f"{len(gevonden)} bedragen van de foto overgenomen; die zijn niet automatisch na te lezen. De sommen "
+                 "per btw-tarief en de aansluiting met de betalingen zijn wel gecontroleerd. Leg de boeking naast de foto.")
+    else:
+        controle(controles, "FOUT" if weg else "OK", "Bedragen staan in het rapport",
+                 ("niet gevonden in het rapport: " + "; ".join(weg)) if weg else
+                 f"alle {len(gevonden) - len(zelf)} overgenomen bedragen staan in het rapport (letterlijk of als "
+                 "basisbedrag + btw)")
+    if foto:                                             # alleen wat Claude zelf als uitgerekend meldt
+        zelf = [f"{wat} {euro_nl(x)}" for wat, x, afg, _ in gevonden if afg]
     if zelf:
         controle(controles, "LET OP", "Door Claude uitgerekende bedragen", "staan niet als zodanig in het rapport: "
                  + "; ".join(zelf))
-    los = [f"{n['omschrijving']} {euro_nl(_d(n['bedrag']))}" for n in r["niet_geboekt"]
-           if _d(n["bedrag"]) and not n["afgeleid"] and not staat_in(_d(n["bedrag"]), schoon)]
+    los = [] if foto else [f"{n['omschrijving']} {euro_nl(_d(n['bedrag']))}" for n in r["niet_geboekt"]
+                           if _d(n["bedrag"]) and not n["afgeleid"] and not staat_in(_d(n["bedrag"]), schoon)]
     if los:
         controle(controles, "LET OP", "Toelichtende posten", "niet gevonden in het rapport (niet geboekt, wel ter "
                  "verklaring van het verschil): " + "; ".join(los))
@@ -215,8 +250,18 @@ def naar_kassaomzet(r: dict, tekst: str, namen: list[str]) -> Kassaomzet:
 
 
 def lees_met_claude(bestanden, ai) -> Kassaomzet:
-    """`bestanden`: lijst (naam, bytes). `ai`: ClaudeAI. Kost één verzoek (± $0,04-0,10)."""
+    """`bestanden`: lijst (naam, bytes): PDF, Excel, tekst of foto's. `ai`: ClaudeAI. Eén verzoek (± $0,04-0,10)."""
     bestanden = [(n, bytes(b)) for n, b in bestanden]
-    tekst = tekst_van_bestanden(bestanden)
-    antwoord = ai._vraag("kassarapport lezen", SYSTEM, tekst, SCHEMA, max_tokens=16000)
-    return naar_kassaomzet(antwoord, tekst, [n for n, _ in bestanden])
+    fotos = [(n, b) for n, b in bestanden if is_foto(b)]
+    overig = [(n, b) for n, b in bestanden if not is_foto(b)]
+    if len(fotos) > MAX_FOTOS:
+        raise OmzetFout(f"Te veel foto's ({len(fotos)}); upload er maximaal {MAX_FOTOS} (één per pagina).")
+    tekst = tekst_van_bestanden(overig) if overig else ""
+    inhoud: str | list = tekst
+    if fotos:
+        inhoud = []
+        for n, b in fotos:
+            inhoud += [{"type": "text", "text": f"=== FOTO: {n} ==="}, foto_blok(b, n)]
+        inhoud.append({"type": "text", "text": tekst or "Het kassarapport staat op de foto('s) hierboven."})
+    antwoord = ai._vraag("kassarapport lezen", SYSTEM, inhoud, SCHEMA, max_tokens=16000)
+    return naar_kassaomzet(antwoord, tekst, [n for n, _ in bestanden], foto=bool(fotos))

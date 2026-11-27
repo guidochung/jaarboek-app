@@ -141,3 +141,56 @@ def test_claude_per_categorie_zonder_tarief_is_gelijk_aan_de_boekhouder():
     b = _boeking(kassa, "cafe_bica")
     assert not b.fout, [c for c in b.controles if c["status"] == "FOUT"]
     assert naar_fmutac(b) == (DATA / "bica_omzet_2026-10_verwacht.csv").read_bytes()
+
+
+def _foto(pdf, schaal=3.0, formaat="JPEG") -> bytes:
+    """'Foto' van een rapport: de PDF-pagina als afbeelding (groter dan Claude nodig heeft)."""
+    import io
+
+    import pypdfium2
+    buf = io.BytesIO()
+    pypdfium2.PdfDocument(str(pdf))[0].render(scale=schaal).to_pil().convert("RGB").save(buf, formaat)
+    return buf.getvalue()
+
+
+def test_foto_van_een_kassarapport_gaat_als_afbeelding_naar_claude():
+    import base64
+    import io
+
+    from PIL import Image
+
+    from jaarboek.kassalezers import lees_omzet
+    from jaarboek.omzet import OnbekendFormaat
+    foto = _foto(DATA / "bica_omzet_2026-10.pdf")
+    with pytest.raises(OnbekendFormaat, match="foto"):
+        lees_omzet([("bica.jpg", foto)])                  # geen vaste lezer: Claude leest foto's
+    nep = NepClaude(kassa=_opname_pad("kassa_claude_bica_categorieen.json"))
+    kassa = lees_met_claude([("bica.jpg", foto)], ClaudeAI(client=nep))
+    blokken = nep.verzoeken[0]["messages"][0]["content"]
+    assert [b["type"] for b in blokken] == ["text", "image", "text"]
+    beeld = blokken[1]["source"]
+    assert beeld["media_type"] == "image/jpeg"
+    assert max(Image.open(io.BytesIO(base64.b64decode(beeld["data"]))).size) <= 1568     # verkleind
+    b = _boeking(kassa, "cafe_bica")
+    status = {c["controle"]: c["status"] for c in b.controles}
+    assert not b.fout and status["Gelezen van een foto"] == "LET OP"
+    assert "Bedragen staan in het rapport" not in status            # niet na te lezen in een foto
+    assert naar_fmutac(b) == (DATA / "bica_omzet_2026-10_verwacht.csv").read_bytes()
+
+
+def test_gedraaide_telefoonfoto_wordt_rechtgezet():
+    import base64
+    import io
+
+    from PIL import Image
+
+    from jaarboek.kassa_claude import foto_blok, is_foto
+    buf, exif = io.BytesIO(), Image.Exif()
+    exif[0x0112] = 6                                       # 'staand gefotografeerd': 90 graden gedraaid
+    Image.new("RGB", (300, 100), "white").save(buf, "JPEG", exif=exif)
+    blok = foto_blok(buf.getvalue(), "telefoon.jpg")
+    assert Image.open(io.BytesIO(base64.b64decode(blok["source"]["data"]))).size == (100, 300)
+    png = _foto(DATA / "bica_omzet_2026-10.pdf", schaal=0.5, formaat="PNG")
+    assert is_foto(buf.getvalue()) and is_foto(png) and not is_foto(b"%PDF-1.7")
+    with pytest.raises(OmzetFout, match="kan deze foto niet openen"):
+        foto_blok(b"\xff\xd8\xff kapot", "kapot.jpg")

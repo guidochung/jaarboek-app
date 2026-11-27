@@ -32,7 +32,7 @@ from jaarboek.ai import MODEL, AIFout, ClaudeAI  # noqa: E402
 from jaarboek.dossier import laad_kantoor  # noqa: E402
 from jaarboek.doorrol import STAPPEN, DoorrolFout, bronnen, formule_tekst, pas_aan, rol_door  # noqa: E402
 from jaarboek.inlezen import InvoerFout  # noqa: E402
-from jaarboek.kassa_claude import lees_met_claude  # noqa: E402
+from jaarboek.kassa_claude import is_foto, lees_met_claude  # noqa: E402
 from jaarboek.kassalezers import lees_omzet  # noqa: E402
 from jaarboek.omzet import (BEDRAGEN, NUL, STIJLEN, TEGENREKENING_LABELS, OmzetFout,  # noqa: E402
                             OnbekendFormaat, OnvolledigeInvoer, asperion_weergave, bewaar_koppeling, btw_uit_bruto,
@@ -248,8 +248,11 @@ def _koppeling_voor(bedrijf: str) -> tuple[dict, str]:
 
 def _lees_met_claude(invoer, sig: str, soort: str, melding: str, ai) -> bool:
     """Onbekend formaat (of de vaste lezer faalt): Claude laten lezen, alleen na een klik. True = gelezen."""
+    foto = any(is_foto(d) for _, d in invoer)
     st.warning((melding if soort == "onbekend" else f"De vaste lezer loopt vast: {melding}")
-               + " Claude kan het rapport lezen; daarna controleert de app elk bedrag tegen het rapport.",
+               + (" Claude leest de foto; daarna controleert de app of de bedragen optellen (per btw-tarief en tegen "
+                  "de betalingen)." if foto else
+                  " Claude kan het rapport lezen; daarna controleert de app elk bedrag tegen het rapport."),
                icon=":material/help:")
     if ai is None:
         st.caption("Vul in de zijbalk een Claude API-sleutel in om het rapport door Claude te laten lezen "
@@ -271,15 +274,15 @@ def _lees_met_claude(invoer, sig: str, soort: str, melding: str, ai) -> bool:
 
 def pagina_omzet(ai) -> None:
     st.html('<p class="jb-kop">Omzet naar Asperion</p>'
-            '<p class="jb-intro">Upload de omzetrapporten van één maand uit de kassa (Excel of PDF). Per kassacategorie '
+            '<p class="jb-intro">Upload de omzetrapporten van één maand uit de kassa (Excel, PDF of foto). Per kassacategorie '
             'en btw-tarief komt er één omzetregel op de juiste grootboekrekening; de tegenkant komt uit de betaalwijzen. '
             'De boeking download je als FMUTAC-CSV voor het kasboek in Asperion. Bekende kassa\'s worden direct '
-            'gelezen; een onbekend formaat kan Claude lezen (API-sleutel nodig).</p>')
+            'gelezen; een onbekend formaat of een foto (JPG) leest Claude (API-sleutel nodig).</p>')
     k1, k2 = st.columns([3, 2], gap="medium")
     with k1:
         st.html('<div class="jb-stap"><span class="jb-nr">1</span>Kassarapporten '
-                '<small>Excel of PDF, alles van één maand</small></div>')
-        bestanden = st.file_uploader("Kassarapporten", type=["xlsx", "pdf", "csv", "txt"], accept_multiple_files=True,
+                '<small>Excel, PDF of foto (JPG), alles van één maand</small></div>')
+        bestanden = st.file_uploader("Kassarapporten", type=["xlsx", "pdf", "csv", "txt", "jpg", "jpeg", "png"], accept_multiple_files=True,
                                      key="oz_rapporten", label_visibility="collapsed")
     with k2:
         st.html('<div class="jb-stap"><span class="jb-nr">2</span>Koppeling <small>optioneel, eerder gedownload</small></div>')
@@ -299,7 +302,7 @@ def pagina_omzet(ai) -> None:
         st.session_state.oz_versie = st.session_state.get("oz_versie", 0) + 1
 
     if not bestanden:
-        st.caption("Nog nodig: de omzetrapporten uit de kassa (Excel of PDF).")
+        st.caption("Nog nodig: de omzetrapporten uit de kassa (Excel, PDF of foto).")
         return
     invoer = tuple((f.name, f.getvalue()) for f in bestanden)
     sig = hashlib.sha1(b"".join(n.encode() + b"\0" + d for n, d in invoer)).hexdigest()[:10]
@@ -447,6 +450,13 @@ def pagina_omzet(ai) -> None:
                                                             "overige inkomsten.")
         if kassa.opmerkingen:
             st.info("\n".join(f"- {html.escape(o)}" for o in kassa.opmerkingen), icon=":material/info:")
+        fotos = [(n, d) for n, d in invoer if is_foto(d)]
+        if fotos:
+            with st.expander(f"Foto{'' if len(fotos) == 1 else '’s'} van het rapport · {len(fotos)}",
+                             icon=":material/photo_camera:"):
+                st.caption("Leg de boeking naast de foto: bedragen van een foto zijn niet automatisch na te lezen.")
+                for n, d in fotos:
+                    st.image(d, caption=n, width="stretch")
         st.write("")
 
     let_op = sum(c["status"] == "LET OP" for c in b.controles)
